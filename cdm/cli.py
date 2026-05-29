@@ -2,13 +2,14 @@
 
 Subcommands::
 
-    drifter            # launch the web app (default)
-    drifter run        # launch the web app
+    drifter            # launch the native desktop app (default)
+    drifter run        # launch the native desktop app
+    drifter web        # launch the Streamlit browser app (localhost-only)
     drifter watch      # run the clipboard auto-capture watcher in the foreground
     drifter version    # print the version
 
-Any extra arguments after ``run`` are passed through to Streamlit, e.g.
-``drifter run --server.port 9000``.
+Any extra arguments after ``web`` are passed through to Streamlit, e.g.
+``drifter web --server.port 9000``.
 """
 
 from __future__ import annotations
@@ -27,7 +28,14 @@ def app_path() -> str:
     return str(Path(__file__).resolve().parent / "app.py")
 
 
-def _run_app(extra: Optional[List[str]] = None) -> int:
+def _run_desktop() -> int:
+    """Launch the native PySide6 desktop app."""
+    from cdm.desktop import main as desktop_main
+
+    return desktop_main()
+
+
+def _run_web(extra: Optional[List[str]] = None) -> int:
     """Launch the Streamlit app, forwarding any extra Streamlit args.
 
     Binds to localhost by default so the app is never exposed on the network;
@@ -47,8 +55,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         description="Context Drift Monitor — track and correct LLM goal drift.",
     )
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser("run", help="Launch the Drifter web app (default).")
+    sub.add_parser("run", help="Launch the native desktop app (default).")
     sub.add_parser("app", help="Alias for 'run'.")
+    sub.add_parser("web", help="Launch the Streamlit browser app (localhost-only).")
     sub.add_parser("watch", help="Run the clipboard auto-capture watcher.")
     sub.add_parser("version", help="Print the installed version.")
 
@@ -56,7 +65,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     command = args.command or "run"
 
     if command in ("run", "app"):
-        return _run_app(extra)
+        return _run_desktop()
+    if command == "web":
+        return _run_web(extra)
     if command == "watch":
         from cdm.watcher import main as watch_main
 

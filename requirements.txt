@@ -1,10 +1,17 @@
-# Core runtime (works on Python 3.14, no compiled ML deps).
-# pandas + altair ship transitively with streamlit and are used by the app.
-streamlit>=1.40
+# Core runtime for the native desktop app (works on Python 3.14; PySide6 ships
+# an abi3 wheel, pyqtgraph is pure-Python).
+PySide6>=6.6
+pyqtgraph>=0.13
 numpy>=1.26
 pyperclip>=1.8   # local clipboard access for automatic turn capture
 
-# --- optional, for higher-quality embeddings (skip on Python 3.14 until wheels exist) ---
-# Install separately if you want neural embeddings instead of the hashing fallback:
+# --- optional: in-app chat providers (install the one(s) you use) ---
+#   pip install anthropic        # Claude
+#   pip install google-genai     # Gemini
+#   pip install openai           # OpenAI
+
+# --- optional: the Streamlit browser app (`drifter web`) ---
+#   pip install streamlit
+
+# --- optional: neural (semantic) embeddings instead of the hashing fallback ---
 #   pip install sentence-transformers
-# The app auto-detects it; with it absent the pure-Python HashingEmbedder is used.

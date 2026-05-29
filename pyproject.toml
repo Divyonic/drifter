@@ -18,12 +18,17 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "streamlit>=1.37",
+    "PySide6>=6.6",
+    "pyqtgraph>=0.13",
     "numpy>=1.26",
     "pyperclip>=1.8",
 ]
 
 [project.optional-dependencies]
+# In-app chat providers (install the one(s) you use).
+llm = ["anthropic>=0.40", "google-genai>=0.3", "openai>=1.40"]
+# The optional Streamlit browser app (`drifter web`).
+web = ["streamlit>=1.37"]
 # Sharper, semantic embeddings (needs wheels for your Python version).
 local = ["sentence-transformers>=2.2"]
 dev = ["pytest>=7"]
