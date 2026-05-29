@@ -1000,6 +1000,7 @@ class MainWindow(QMainWindow):
         self._stream_label: Optional[QLabel] = None
         self._stream_text = ""
         self._bubbles: List[QWidget] = []
+        self.go_back = False  # set when the user returns to the session menu
         # Tail mode: monitor a live Claude Code terminal transcript (read-only).
         self.tail = cc.ClaudeCodeTail(tail_path, start_at_end=True) if tail_path else None
 
@@ -1025,6 +1026,10 @@ class MainWindow(QMainWindow):
         outer.setSpacing(14)
 
         head = QHBoxLayout()
+        back_btn = QPushButton("‹ Sessions")
+        back_btn.setToolTip("Back to the session menu (your work is saved)")
+        back_btn.clicked.connect(self._go_back)
+        head.addWidget(back_btn)
         title = QLabel(session.project_name if session else "Drifter")
         title.setObjectName("h1")
         head.addWidget(title)
@@ -1295,6 +1300,11 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(running)
 
     # -- actions ------------------------------------------------------------- #
+    def _go_back(self) -> None:
+        """Return to the session menu without quitting the app (work is saved)."""
+        self.go_back = True
+        self.close()
+
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self.provider, self.model, self.monitor.store, self)
         if dlg.exec() == QDialog.Accepted:
@@ -1471,6 +1481,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         try:
+            self._timer.stop()
             if self._thread and self._thread.isRunning():
                 self._thread.stop()
                 self._thread.wait(2000)
@@ -1510,18 +1521,21 @@ def main() -> int:
     pref = store.get_meta("embedder") or config.EMBEDDER_PREFERENCE
     monitor = DriftMonitor(store=store, embedder=safe_embedder(pref))
 
-    first_run = not load_profile_name() and not store.list_sessions()
-    if first_run:
-        dlg: QDialog = OnboardingWizard(monitor)
-    else:
-        dlg = LaunchDialog(monitor)
-    if dlg.exec() != QDialog.Accepted or not dlg.chosen_session_id:
-        return 0
-
-    monitor.store.set_active_session(dlg.chosen_session_id)
-    window = MainWindow(monitor, dlg.chosen_session_id, tail_path=getattr(dlg, "chosen_tail_path", None))
-    window.show()
-    return app.exec()
+    # Loop: menu -> session window -> (Back) -> menu … until the user quits.
+    while True:
+        first_run = not load_profile_name() and not monitor.store.list_sessions()
+        dlg: QDialog = OnboardingWizard(monitor) if first_run else LaunchDialog(monitor)
+        if dlg.exec() != QDialog.Accepted or not dlg.chosen_session_id:
+            break
+        monitor.store.set_active_session(dlg.chosen_session_id)
+        window = MainWindow(
+            monitor, dlg.chosen_session_id, tail_path=getattr(dlg, "chosen_tail_path", None)
+        )
+        window.show()
+        app.exec()  # returns when the window closes
+        if not window.go_back:
+            break  # closed via the window button / quit -> exit the app
+    return 0
 
 
 if __name__ == "__main__":
