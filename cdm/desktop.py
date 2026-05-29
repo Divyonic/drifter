@@ -154,6 +154,24 @@ def build_qss() -> str:
     return s
 
 
+def is_dark() -> bool:
+    """True if the dark palette is currently active."""
+    return C.get("bg") == DARK["bg"]
+
+
+def _apply_theme(dark: bool, store=None) -> None:
+    """Switch palette, restyle the app live, and (optionally) persist the choice."""
+    set_dark(dark)
+    app = QApplication.instance()
+    if app is not None:
+        app.setStyleSheet(build_qss())
+    if store is not None:
+        try:
+            store.set_meta("theme", "dark" if dark else "light")
+        except Exception:
+            pass
+
+
 def _md_to_html(text: str) -> str:
     """Render markdown to the HTML subset QLabel understands (with a plain fallback)."""
     try:
@@ -333,9 +351,9 @@ class DriftChart(pg.PlotWidget):
         self.setBackground(C["bg"])
         self.setMenuEnabled(False)
         self.setMouseEnabled(x=True, y=True)   # scroll to zoom, drag to pan
-        self.setLimits(yMin=-0.05, yMax=1.08)
+        self.setLimits(yMin=-0.05, yMax=2.1)
         self.hideButtons()
-        self.setYRange(0, 1.0, padding=0.02)
+        self.setYRange(0, 2.0, padding=0.02)   # 0–2 cosine range; 1.0 sits centered
         self.showGrid(x=False, y=True, alpha=0.08)
         for ax in ("left", "bottom"):
             self.getAxis(ax).setTextPen(C["muted"])
@@ -425,8 +443,27 @@ class DriftChart(pg.PlotWidget):
             f"turn {turn} · {role}\ndrift {a:.2f}  ·  ref {r:.2f}"
             + (f"\n{snippet}" if snippet else "")
         )
-        self._hover.setPos(turn, min(1.05, a + 0.04))
+        self._hover.setPos(turn, min(2.0, a + 0.04))
         self._hover.show()
+
+    def apply_theme(self) -> None:
+        """Recolor the chart for the current palette (used on theme toggle)."""
+        try:
+            self.setBackground(C["bg"])
+            for ax in ("left", "bottom"):
+                self.getAxis(ax).setTextPen(C["muted"])
+                self.getAxis(ax).setPen(C["line_soft"])
+            self._anchor.setPen(pg.mkPen(C["accent"], width=2.2))
+            self._reference.setPen(pg.mkPen(_rgba(C["muted"], 150), width=1.0))
+            self._forecast.setPen(pg.mkPen(C["accent"], width=1.4, style=Qt.DashLine))
+            self._threshold.setPen(pg.mkPen(C["danger"], width=1.2, style=Qt.DotLine))
+            self._cp.setPen(pg.mkPen(C["muted"], width=1.0, style=Qt.DashLine))
+            self._cross_v.setPen(pg.mkPen(_rgba(C["muted"], 110), width=1))
+            self._cross_h.setPen(pg.mkPen(_rgba(C["muted"], 110), width=1))
+            self._danger.setBrush(_rgba(C["danger"], 18))
+            self._band.setBrush(_rgba(C["muted"], 22))
+        except Exception:
+            pass
 
     def reset_view(self) -> None:
         """Reset zoom/pan to the full series with the standard 0–1 drift range."""
@@ -434,7 +471,7 @@ class DriftChart(pg.PlotWidget):
             self.getViewBox().autoRange(padding=0.04)
         except Exception:
             pass
-        self.setYRange(0, 1.0, padding=0.02)
+        self.setYRange(0, 2.0, padding=0.02)
 
     def update(self, ts: dict) -> None:
         turns = list(ts.get("turns") or [])
@@ -453,7 +490,7 @@ class DriftChart(pg.PlotWidget):
             self._anchor.setData(turns, anchor, symbol=None)
         self._reference.setData(turns, reference)
         self._threshold.setValue(threshold)
-        self._danger.setRegion([threshold, 1.08])  # subtle "off-track" zone
+        self._danger.setRegion([threshold, 2.1])  # subtle "off-track" zone (to top)
 
         # Baseline band only when it's tight enough to be meaningful (else it floods).
         mean, std = ts.get("baseline_mean"), ts.get("baseline_std")
@@ -475,7 +512,7 @@ class DriftChart(pg.PlotWidget):
             x0, y0 = turns[-1], anchor[-1]
             self._forecast.setData([x0, x0 + fc], [y0, threshold])
             self._fc_text.setText(f"~{fc:.0f} turns to drift")
-            self._fc_text.setPos(x0, min(1.05, threshold + 0.07))
+            self._fc_text.setPos(x0, min(2.0, threshold + 0.07))
             self._fc_text.show()
         else:
             self._forecast.setData([], [])
@@ -1122,8 +1159,12 @@ class LaunchDialog(QDialog):
         sid = self._selected_id()
         if not sid:
             return
-        if QMessageBox.question(self, "Delete session", "Delete this session permanently?") \
-                == QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(
+            self, "Remove session from Drifter",
+            "Remove this session from Drifter?\n\nThis only deletes Drifter's local "
+            "record (its drift history in Drifter's database). Your files, and your "
+            "chat history with the LLM, are NOT touched.",
+        ) == QMessageBox.StandardButton.Yes:
             self.monitor.store.delete_session(sid)
             self._populate()
 
@@ -1190,6 +1231,7 @@ class MainWindow(QMainWindow):
         self._refresh_chart()
         self._update_coach()
         self._update_buttons()
+        self._update_theme_btn()
 
         self._timer = QTimer(self)
         self._timer.setInterval(1500)
@@ -1218,6 +1260,11 @@ class MainWindow(QMainWindow):
         self.provider_label = QLabel()
         self.provider_label.setObjectName("muted")
         head.addWidget(self.provider_label)
+        self.theme_btn = QPushButton()
+        self.theme_btn.setObjectName("link")
+        self.theme_btn.setToolTip("Toggle light / dark mode")
+        self.theme_btn.clicked.connect(self._toggle_theme)
+        head.addWidget(self.theme_btn)
         settings_btn = QPushButton("Settings")
         settings_btn.clicked.connect(self._open_settings)
         head.addWidget(settings_btn)
@@ -1303,15 +1350,15 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         self.chip = QLabel("on track")
         self.chip.setObjectName("chipOk")
-        self.metric = QLabel("drift 0.000")
-        self.metric.setObjectName("muted")
+        self.metric_label = QLabel("drift 0.000")
+        self.metric_label.setObjectName("muted")
         reset_btn = QPushButton("⤢ Reset")
         reset_btn.setObjectName("link")
         reset_btn.setToolTip("Reset zoom · scroll to zoom, drag to pan, hover for details")
         reset_btn.clicked.connect(lambda: self.chart.reset_view())
         top.addWidget(self.chip)
         top.addStretch(1)
-        top.addWidget(self.metric)
+        top.addWidget(self.metric_label)
         top.addWidget(reset_btn)
         lay.addLayout(top)
 
@@ -1356,10 +1403,11 @@ class MainWindow(QMainWindow):
         lay.addLayout(th_row)
 
         legend = QLabel(
-            f"<span style='color:{C['accent']}'>●</span> vs your goal &nbsp;&nbsp;"
-            f"<span style='color:{C['muted']}'>●</span> vs recent context &nbsp;&nbsp;"
-            f"<span style='color:{C['danger']}'>●</span> alert threshold &nbsp;&nbsp;"
-            f"<span style='color:{C['muted']}'>▭</span> normal range"
+            f"<span style='color:{C['accent']}'>●</span> <b>orange</b> = drift from your "
+            f"<b>original goal</b> &nbsp;&nbsp;"
+            f"<span style='color:{C['muted']}'>●</span> <b>grey</b> = drift from the "
+            f"<b>recent conversation</b> &nbsp;&nbsp;"
+            f"<span style='color:{C['danger']}'>●</span> alert threshold &nbsp;&nbsp;▭ normal range"
         )
         legend.setTextFormat(Qt.RichText)
         lay.addWidget(legend)
@@ -1490,6 +1538,14 @@ class MainWindow(QMainWindow):
         """Return to the session menu without quitting the app (work is saved)."""
         self.go_back = True
         self.close()
+
+    def _update_theme_btn(self) -> None:
+        self.theme_btn.setText("☀️ Light" if is_dark() else "🌙 Dark")
+
+    def _toggle_theme(self) -> None:
+        _apply_theme(not is_dark(), self.monitor.store)
+        self.chart.apply_theme()
+        self._update_theme_btn()
 
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self.provider, self.model, self.monitor.store, self)
@@ -1654,7 +1710,7 @@ class MainWindow(QMainWindow):
         self.chart.update(ts)
         last = anchor[-1] if anchor else 0.0
         high = bool(turns) and (last > threshold)
-        self.metric.setText(f"drift {last:.3f} · {len(turns)} turns")
+        self.metric_label.setText(f"drift {last:.3f} · {len(turns)} turns")
         if high:
             self.chip.setText("DRIFTING")
             self.chip.setObjectName("chipBad")
@@ -1689,16 +1745,33 @@ def main() -> int:
     app = QApplication.instance() or QApplication([])
     app.setApplicationName("Drifter")
 
-    try:
-        set_dark(app.styleHints().colorScheme() == Qt.ColorScheme.Dark)
-    except Exception:
+    from cdm.storage import Store
+
+    store = Store()
+
+    # Theme: honour the user's saved choice; otherwise follow macOS.
+    theme = store.get_meta("theme")
+    if theme == "dark":
+        set_dark(True)
+    elif theme == "light":
         set_dark(False)
+    else:
+        try:
+            set_dark(app.styleHints().colorScheme() == Qt.ColorScheme.Dark)
+        except Exception:
+            set_dark(False)
     app.setStyleSheet(build_qss())
+
+    def _on_scheme(_s=None):
+        if store.get_meta("theme") in (None, "auto"):  # only auto-follow if unset
+            try:
+                set_dark(app.styleHints().colorScheme() == Qt.ColorScheme.Dark)
+            except Exception:
+                return
+            app.setStyleSheet(build_qss())
+
     try:
-        app.styleHints().colorSchemeChanged.connect(
-            lambda _s: (set_dark(app.styleHints().colorScheme() == Qt.ColorScheme.Dark),
-                        app.setStyleSheet(build_qss()))
-        )
+        app.styleHints().colorSchemeChanged.connect(_on_scheme)
     except Exception:
         pass
     app.setFont(QFont("-apple-system", 13))
@@ -1706,9 +1779,6 @@ def main() -> int:
 
     show_splash(app)  # logo, fades in then out
 
-    from cdm.storage import Store
-
-    store = Store()
     pref = store.get_meta("embedder") or config.EMBEDDER_PREFERENCE
     monitor = DriftMonitor(store=store, embedder=safe_embedder(pref))
 
