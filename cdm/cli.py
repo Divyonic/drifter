@@ -28,10 +28,15 @@ def app_path() -> str:
 
 
 def _run_app(extra: Optional[List[str]] = None) -> int:
-    """Launch the Streamlit app, forwarding any extra Streamlit args."""
-    cmd = [sys.executable, "-m", "streamlit", "run", app_path()]
-    if extra:
-        cmd.extend(extra)
+    """Launch the Streamlit app, forwarding any extra Streamlit args.
+
+    Binds to localhost by default so the app is never exposed on the network;
+    pass ``--server.address 0.0.0.0`` explicitly if you really want LAN access.
+    """
+    extra = list(extra or [])
+    if not any(str(a).startswith("--server.address") for a in extra):
+        extra = ["--server.address", "localhost", *extra]
+    cmd = [sys.executable, "-m", "streamlit", "run", app_path(), *extra]
     return subprocess.call(cmd)
 
 

@@ -43,5 +43,5 @@ source "$VENV_DIR/bin/activate"
 python -m pip install --upgrade pip >/dev/null
 python -m pip install -r requirements.txt
 
-# Launch the app.
-exec streamlit run app.py
+# Launch the app, bound to localhost only (not exposed on the network).
+exec streamlit run app.py --server.address localhost
