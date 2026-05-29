@@ -15,12 +15,12 @@ def test_all_slots_filled() -> None:
     }
     out = render_corrective_prompt(raw)
 
-    assert "Core goal: design a pan-tilt EO/IR mount under 5 kg" in out
+    assert "My goal: design a pan-tilt EO/IR mount under 5 kg" in out
     assert "- mass < 5 kg" in out
     assert "- must use brushless motors" in out
     assert "- chose carbon fibre frame" in out
     assert "- selected harmonic drives" in out
-    assert "Current focus: gimbal bearing selection" in out
+    assert "focused on right now: gimbal bearing selection" in out
     assert "(none specified)" not in out
 
 
@@ -35,12 +35,9 @@ def test_empty_lists_render_none_specified() -> None:
     out = render_corrective_prompt(raw)
 
     assert out.count("(none specified)") == 2
-    # The constraint/decision slots themselves collapse to "(none specified)"
-    # rather than emitting any data bullets. (The template's own fixed
-    # instruction lines legitimately start with "- ", so a blanket
-    # `"- " not in out` check would be impossible — assert the slots instead.)
-    assert "  - Constraints:\n(none specified)" in out
-    assert "  - Recent decisions:\n(none specified)" in out
+    # Both list slots collapse to "(none specified)" rather than emitting bullets.
+    assert "Constraints that matter to me:\n(none specified)" in out
+    assert "What we've already decided:\n(none specified)" in out
 
 
 def test_output_contains_core_goal_text() -> None:
@@ -53,8 +50,8 @@ def test_output_contains_core_goal_text() -> None:
 def test_missing_keys_tolerated() -> None:
     """A dict missing every key still renders without raising."""
     out = render_corrective_prompt({})
-    assert "Core goal:" in out
-    assert "Current focus:" in out
+    assert "My goal:" in out
+    assert "focused on right now:" in out
     assert out.count("(none specified)") == 2
 
 
@@ -79,13 +76,30 @@ def test_blank_entries_skipped() -> None:
 
 
 def test_uses_template_structure() -> None:
-    """Rendered output preserves the template's fixed instruction lines."""
+    """Rendered output preserves the template's natural, first-person framing."""
     out = render_corrective_prompt({"core_goal": "g", "current_focus": "f"})
-    assert out.startswith("You are acting as a strict alignment assistant.")
-    assert "- If any future message of mine contradicts these" in out
-    assert out.rstrip().endswith("then continue.")
+    assert out.lstrip().startswith("Quick refocus")
+    assert "steer us back" in out
     # template has the expected slot scaffolding
     assert "{core_goal}" in CORRECTIVE_TEMPLATE
     assert "{constraints}" in CORRECTIVE_TEMPLATE
     assert "{decisions}" in CORRECTIVE_TEMPLATE
     assert "{current_focus}" in CORRECTIVE_TEMPLATE
+
+
+def test_corrective_prompt_avoids_injection_phrasing() -> None:
+    """The corrective prompt must read as the user speaking, not a system override —
+    otherwise the assistant flags it as a prompt-injection attempt and refuses."""
+    out = render_corrective_prompt(
+        {"core_goal": "keep the pizza vegetarian", "constraints": ["no meat"], "current_focus": "toppings"}
+    ).lower()
+    for bad in [
+        "you are acting as",
+        "from now on",
+        "you must",
+        "ignore previous",
+        "ignore all",
+        "system prompt",
+        "alignment assistant",
+    ]:
+        assert bad not in out, f"corrective prompt contains injection-flagging phrase: {bad!r}"

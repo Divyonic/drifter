@@ -13,17 +13,19 @@ from typing import Any, Dict, List
 __all__ = ["CORRECTIVE_TEMPLATE", "render_corrective_prompt"]
 
 
-CORRECTIVE_TEMPLATE: str = """You are acting as a strict alignment assistant. From now on, you must:
-- Respect the following goal and constraints exactly:
-  - Core goal: {core_goal}
-  - Constraints:
+CORRECTIVE_TEMPLATE: str = """Quick refocus — I want to make sure we stay on track with what I'm actually trying to do here.
+
+My goal: {core_goal}
+
+Constraints that matter to me:
 {constraints}
-  - Recent decisions:
+
+What we've already decided:
 {decisions}
-  - Current focus: {current_focus}
-- If any future message of mine contradicts these, prioritise them and say so.
-- If my next message seems off-track, gently orient the conversation back to this goal.
-First, summarise this corrected context in one short paragraph, then continue."""
+
+What I'm focused on right now: {current_focus}
+
+Please keep your next replies anchored to this goal and these constraints, and if one of my messages starts drifting away from it, gently point that out and help steer us back. To confirm we're on the same page, briefly restate my goal and constraints in a sentence or two, then carry on."""
 
 
 def _bullet_list(items: Any) -> str:
