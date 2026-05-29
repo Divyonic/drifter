@@ -110,10 +110,21 @@ you've genuinely drifted* — no app, no pasting. Add to `~/.claude/settings.jso
 }
 ```
 
-The hook reads your session transcript, measures drift from the original goal with
-the fast offline embedder (no latency, no network), and prints a re-anchor to stdout
-when you're off-track — which Claude Code adds as context for that turn. It never
-blocks your prompt.
+The hook reads your session transcript and flags a turn only when the conversation
+has *sustainedly* departed from its own baseline — it self-calibrates per chat, so a
+one-off tangent or a lexically-divergent but on-goal prompt won't trip it. When you're
+genuinely off-track it prints a re-anchor to stdout, which Claude Code adds as context
+for that turn. It never blocks your prompt.
+
+By default it uses the fast offline hashing embedder (zero latency, no network). That
+embedder can't reliably tell on- from off-goal turns, so on it the hook errs toward
+silence. For a hook that actually fires on real drift, opt into the semantic embedder:
+
+```json
+{ "type": "command", "command": "drifter hook", "env": { "DRIFTER_HOOK_EMBEDDER": "semantic" } }
+```
+
+(`semantic` downloads a small model once, then runs fully offline.)
 
 ### Smart mode (LLM understands your goal)
 

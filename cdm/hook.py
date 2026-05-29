@@ -24,6 +24,7 @@ Wire it up in ``~/.claude/settings.json``::
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Dict, Optional
 
@@ -84,11 +85,17 @@ def run_hook(payload: Dict, threshold: Optional[float] = None, embedder=None) ->
 
 
 def main(argv: Optional[list] = None) -> int:
-    """stdin → drift check → optional re-anchor on stdout. Always exits 0."""
+    """stdin → drift check → optional re-anchor on stdout. Always exits 0.
+
+    Honours ``DRIFTER_HOOK_EMBEDDER`` (e.g. ``semantic``) to opt into a stronger
+    embedder; defaults to the fast offline hashing embedder. The hashing embedder
+    can't separate on- from off-goal turns, so set this to ``semantic`` for a hook
+    that actually fires on real drift (downloads a small model once, then offline).
+    """
     try:
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
-        out = run_hook(payload)
+        out = run_hook(payload, embedder=os.environ.get("DRIFTER_HOOK_EMBEDDER") or None)
         if out.get("context"):
             sys.stdout.write(
                 "[Drifter] Heads up — this turn looks off-track from the original goal. "
