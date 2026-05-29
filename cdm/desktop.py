@@ -49,6 +49,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cdm import claude_code as cc
 from cdm import config
 from cdm.embeddings import get_embedder
 from cdm.llm import (
@@ -442,6 +443,7 @@ class OnboardingWizard(QDialog):
         super().__init__(parent)
         self.monitor = monitor
         self.chosen_session_id: Optional[str] = None
+        self.chosen_tail_path: Optional[str] = None
         self.provider = default_provider()
         self.model = PROVIDERS[self.provider]["default_model"]
         self.setWindowTitle("Welcome to Drifter")
@@ -699,13 +701,98 @@ class NewSessionDialog(QDialog):
         return self.name.text().strip(), self.goal.toPlainText().strip(), cons
 
 
+def start_cc_monitoring(monitor: DriftMonitor, cc_path: str) -> Optional[str]:
+    """Create a Drifter session from a Claude Code transcript (anchor = first
+    prompt; ingest the rest). Returns the new session id, or None if empty."""
+    turns = cc.parse_transcript_file(cc_path)
+    if not turns:
+        return None
+    anchor = turns[0]["text"]
+    label = (anchor[:40] + "…") if len(anchor) > 40 else anchor
+    session = monitor.start_session(f"Claude Code · {label}", anchor, [])
+    rest = [{"role": t["role"], "text": t["text"]} for t in turns[1:]]
+    if rest:
+        monitor.ingest_transcript(session.session_id, rest)
+    return session.session_id
+
+
+class ClaudeCodeDialog(QDialog):
+    """Pick a Claude Code session to monitor (live-tail its transcript)."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.chosen_path: Optional[str] = None
+        self.setWindowTitle("Monitor a Claude Code session")
+        self.setMinimumSize(640, 540)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(32, 28, 32, 24)
+        root.setSpacing(12)
+        title = QLabel("Monitor your Claude Code terminal")
+        title.setObjectName("h1")
+        root.addWidget(title)
+        sub = QLabel(
+            "Pick a session. Drifter reads its transcript and draws the drift graph "
+            "live while you keep chatting in your `claude` terminal — nothing to paste."
+        )
+        sub.setObjectName("muted")
+        sub.setWordWrap(True)
+        root.addWidget(sub)
+
+        self.list = QListWidget()
+        self._sessions = cc.list_sessions()
+        for s in self._sessions:
+            item = QListWidgetItem(f"{s['title']}\n{s['cwd']}  ·  {s['session_id'][:8]}")
+            item.setData(Qt.UserRole, s["path"])
+            self.list.addItem(item)
+        if self.list.count():
+            self.list.setCurrentRow(0)
+        self.list.itemDoubleClicked.connect(lambda _i: self._pick())
+        root.addWidget(self.list, 1)
+        if not self._sessions:
+            empty = QLabel("No Claude Code sessions found under ~/.claude/projects.")
+            empty.setObjectName("muted")
+            root.addWidget(empty)
+
+        row = QHBoxLayout()
+        cancel = QPushButton("Cancel")
+        refresh = QPushButton("Refresh")
+        pick = QPushButton("Monitor")
+        pick.setObjectName("primary")
+        cancel.clicked.connect(self.reject)
+        refresh.clicked.connect(self._refresh)
+        pick.clicked.connect(self._pick)
+        row.addWidget(cancel)
+        row.addWidget(refresh)
+        row.addStretch(1)
+        row.addWidget(pick)
+        root.addLayout(row)
+
+    def _refresh(self) -> None:
+        self.list.clear()
+        self._sessions = cc.list_sessions()
+        for s in self._sessions:
+            item = QListWidgetItem(f"{s['title']}\n{s['cwd']}  ·  {s['session_id'][:8]}")
+            item.setData(Qt.UserRole, s["path"])
+            self.list.addItem(item)
+        if self.list.count():
+            self.list.setCurrentRow(0)
+
+    def _pick(self) -> None:
+        item = self.list.currentItem()
+        if item is None:
+            return
+        self.chosen_path = item.data(Qt.UserRole)
+        self.accept()
+
+
 class LaunchDialog(QDialog):
     def __init__(self, monitor: DriftMonitor, parent=None) -> None:
         super().__init__(parent)
         self.monitor = monitor
         self.chosen_session_id: Optional[str] = None
+        self.chosen_tail_path: Optional[str] = None
         self.setWindowTitle("Drifter")
-        self.setMinimumSize(580, 600)
+        self.setMinimumSize(580, 620)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(36, 32, 36, 28)
@@ -726,11 +813,14 @@ class LaunchDialog(QDialog):
         manage = QHBoxLayout()
         rename_btn = QPushButton("Rename")
         delete_btn = QPushButton("Delete")
+        cc_btn = QPushButton("Monitor Claude Code…")
         rename_btn.clicked.connect(self._rename)
         delete_btn.clicked.connect(self._delete)
+        cc_btn.clicked.connect(self._monitor_cc)
         manage.addWidget(rename_btn)
         manage.addWidget(delete_btn)
         manage.addStretch(1)
+        manage.addWidget(cc_btn)
         root.addLayout(manage)
 
         btns = QHBoxLayout()
@@ -818,6 +908,22 @@ class LaunchDialog(QDialog):
             self.monitor.store.delete_session(sid)
             self._populate()
 
+    def _monitor_cc(self) -> None:
+        dlg = ClaudeCodeDialog(self)
+        if dlg.exec() != QDialog.Accepted or not dlg.chosen_path:
+            return
+        try:
+            sid = start_cc_monitoring(self.monitor, dlg.chosen_path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Drifter", f"Could not read that session: {exc}")
+            return
+        if not sid:
+            QMessageBox.warning(self, "Drifter", "That session has no messages yet.")
+            return
+        self.chosen_session_id = sid
+        self.chosen_tail_path = dlg.chosen_path
+        self.accept()
+
     def _connect(self) -> None:
         provider = first_connected_provider() or "claude"
         SettingsDialog(provider, PROVIDERS[provider]["default_model"], self.monitor.store, self).exec()
@@ -835,7 +941,7 @@ class LaunchDialog(QDialog):
 # Main window
 # --------------------------------------------------------------------------- #
 class MainWindow(QMainWindow):
-    def __init__(self, monitor: DriftMonitor, session_id: str) -> None:
+    def __init__(self, monitor: DriftMonitor, session_id: str, tail_path: Optional[str] = None) -> None:
         super().__init__()
         self.monitor = monitor
         self.session_id = session_id
@@ -845,6 +951,8 @@ class MainWindow(QMainWindow):
         self._stream_label: Optional[QLabel] = None
         self._stream_text = ""
         self._bubbles: List[QWidget] = []
+        # Tail mode: monitor a live Claude Code terminal transcript (read-only).
+        self.tail = cc.ClaudeCodeTail(tail_path, start_at_end=True) if tail_path else None
 
         session = monitor.store.get_session(session_id)
         self.setWindowTitle(f"Drifter — {session.project_name if session else ''}")
@@ -942,6 +1050,13 @@ class MainWindow(QMainWindow):
 
         QShortcut(QKeySequence("Ctrl+Return"), self.input, activated=self._on_send)
         QShortcut(QKeySequence("Meta+Return"), self.input, activated=self._on_send)
+
+        if self.tail:  # read-only monitor: chatting happens in the terminal
+            self.input.hide()
+            self.regen_btn.hide()
+            self.stop_btn.hide()
+            self.send_btn.hide()
+            self.status.setText("● Monitoring your Claude Code terminal — chat there; this graph updates live.")
         return panel
 
     def _build_drift_panel(self) -> QWidget:
@@ -1058,6 +1173,18 @@ class MainWindow(QMainWindow):
         self.provider_label.setText(f"{dot} {PROVIDERS[self.provider]['label']} · {self.model}")
 
     def _update_coach(self) -> None:
+        if self.tail:
+            if self._last_drift_high():
+                self.coach.setText(
+                    "③ Drift detected in your Claude Code chat — see the corrective prompt "
+                    "on the right; paste it into your terminal to re-align."
+                )
+            else:
+                self.coach.setText(
+                    "● Monitoring your Claude Code terminal — keep chatting there; the "
+                    "graph updates live."
+                )
+            return
         n = len(self.monitor.store.get_messages(self.session_id))
         if not provider_ready(self.provider):
             self.coach.setText(
@@ -1216,6 +1343,13 @@ class MainWindow(QMainWindow):
 
     # -- refresh ------------------------------------------------------------- #
     def _tick(self) -> None:
+        if self.tail:
+            try:
+                for t in self.tail.new_turns():
+                    self.monitor.add_turn(self.session_id, t["role"], t["text"])
+                    self._add_bubble(t["role"], t["text"], rich=(t["role"] != "user"))
+            except Exception:
+                pass
         self._refresh_chart()
         self._update_coach()
         self._update_buttons()
@@ -1295,7 +1429,7 @@ def main() -> int:
         return 0
 
     monitor.store.set_active_session(dlg.chosen_session_id)
-    window = MainWindow(monitor, dlg.chosen_session_id)
+    window = MainWindow(monitor, dlg.chosen_session_id, tail_path=getattr(dlg, "chosen_tail_path", None))
     window.show()
     return app.exec()
 

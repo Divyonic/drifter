@@ -61,6 +61,12 @@ drifter
    **corrective prompt** appears. Hit **Send to re-align** (or **Copy**). With
    *Auto re-align* on, Drifter folds the corrective prompt into the next request for you.
 
+**Already chatting in Claude Code (the terminal)?** Click **"Monitor Claude Code…"** on
+the launch screen and pick your session. Drifter tails its transcript
+(`~/.claude/projects/…`) and draws the drift graph **live** while you keep working in
+your `claude` terminal — keyless, read-only, nothing to paste. When it drifts, paste the
+corrective prompt into your terminal to re-align.
+
 **Using a ChatGPT Plus / Gemini Advanced subscription (no key)?** Those plans don't
 offer programmatic access, so keep chatting in their official app and tick
 **"Also capture clipboard"** — anything you copy (Cmd/Ctrl+C) becomes a monitored turn.
