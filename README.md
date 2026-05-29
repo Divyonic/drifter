@@ -48,8 +48,12 @@ drifter
 1. **Launch** → Drifter asks *which session you want to continue today*. Pick a past
    session, start a **New session** (project + goal + constraints), or **Import** a
    past chat transcript (JSON / `User:`-`Assistant:` markdown) to resume monitoring it.
-2. **Settings** → choose your provider (Claude / Gemini / OpenAI), model, and paste an
-   API key (stored locally only).
+2. **Connect your AI** (Settings, or step 2 of setup). Two ways, no billing surprises:
+   - **No API key — use your Claude subscription.** If you have [Claude Code](https://claude.com/claude-code)
+     installed and signed in (Pro/Max), pick **“Claude — your subscription (no key)”**.
+     Drifter drives the local `claude` CLI; nothing metered, no key.
+   - **API key.** Pick Claude / Gemini / OpenAI, choose a model (latest seeded, or
+     **Refresh** the live list), and paste a key (stored locally only).
 3. **Chat** in the app. Every message and reply is scored; the **drift chart updates
    live** (orange = drift vs your original goal, grey dashed = vs the rolling
    reference, red dotted = threshold).
@@ -57,9 +61,11 @@ drifter
    **corrective prompt** appears. Hit **Send to re-align** (or **Copy**). With
    *Auto re-align* on, Drifter folds the corrective prompt into the next request for you.
 
-Want to monitor a chat you're having **in a browser** (e.g. Gemini on the web) instead
-of in-app? Tick **"Also capture clipboard"** — anything you copy (Cmd/Ctrl+C) is added
-as a turn.
+**Using a ChatGPT Plus / Gemini Advanced subscription (no key)?** Those plans don't
+offer programmatic access, so keep chatting in their official app and tick
+**"Also capture clipboard"** — anything you copy (Cmd/Ctrl+C) becomes a monitored turn.
+That's the keyless, ToS-safe way to monitor any web LLM. (Only Claude offers a
+supported keyless API path, via Claude Code above.)
 
 ### Commands
 

@@ -54,11 +54,13 @@ from cdm.embeddings import get_embedder
 from cdm.llm import (
     PROVIDERS,
     LLMError,
+    claude_cli_available,
     curated_models,
     get_key,
     key_url,
     list_models,
     load_keys,
+    provider_ready,
     save_key,
 )
 from cdm.monitor import DriftMonitor
@@ -209,11 +211,13 @@ def time_greeting(name: str = "") -> str:
 
 
 def first_connected_provider() -> Optional[str]:
-    return next((p for p in PROVIDERS if get_key(p)), None)
+    """First provider usable now (keyless CLI present, or a key set)."""
+    return next((p for p in PROVIDERS if provider_ready(p)), None)
 
 
-def any_key_present() -> bool:
-    return first_connected_provider() is not None
+def default_provider() -> str:
+    """Best default: a ready provider, else keyless CLI if installed, else Claude API."""
+    return first_connected_provider() or ("claude-cli" if claude_cli_available() else "claude")
 
 
 def safe_embedder(preference: str):
@@ -376,11 +380,25 @@ class ProviderSetup(QWidget):
         self.model.clear()
         self.model.addItems(curated_models(provider))
         self.model.setCurrentText(model or meta["default_model"])
-        self.key.setText(load_keys().get(provider, ""))
-        self.hint.setText(
-            f"Where to find it: {meta['key_hint']}. Click ‘Get an API key’, sign in, "
-            "create a key, paste it here. Stored only on this Mac."
-        )
+        keyless = bool(meta.get("keyless"))
+        self.key.setVisible(not keyless)
+        self.get_key_btn.setVisible(not keyless)
+        self.refresh_btn.setVisible(not keyless)
+        if keyless:
+            self.key.clear()
+            if claude_cli_available():
+                self.hint.setText("✓ Using your Claude subscription via Claude Code — no API key needed.")
+            else:
+                self.hint.setText(
+                    "Claude Code isn’t installed. Install it and run `claude` once to sign "
+                    "in to your subscription, or choose an API provider instead."
+                )
+        else:
+            self.key.setText(load_keys().get(provider, ""))
+            self.hint.setText(
+                f"Where to find it: {meta['key_hint']}. Click ‘Get an API key’, sign in, "
+                "create a key, paste it here. Stored only on this Mac."
+            )
 
     def _open_key_url(self) -> None:
         QDesktopServices.openUrl(QUrl(key_url(self._current())))
@@ -424,8 +442,8 @@ class OnboardingWizard(QDialog):
         super().__init__(parent)
         self.monitor = monitor
         self.chosen_session_id: Optional[str] = None
-        self.provider = "claude"
-        self.model = PROVIDERS["claude"]["default_model"]
+        self.provider = default_provider()
+        self.model = PROVIDERS[self.provider]["default_model"]
         self.setWindowTitle("Welcome to Drifter")
         self.setMinimumSize(640, 600)
 
@@ -486,7 +504,7 @@ class OnboardingWizard(QDialog):
         msg.setObjectName("muted")
         msg.setWordWrap(True)
         lay.addWidget(msg)
-        self.setup = ProviderSetup()
+        self.setup = ProviderSetup(provider=default_provider())
         lay.addWidget(self.setup)
         lay.addStretch(1)
         return w
@@ -527,11 +545,11 @@ class OnboardingWizard(QDialog):
             return
         if i == 1:
             self.provider, self.model, _ = self.setup.persist()
-            if not get_key(self.provider):
+            if not provider_ready(self.provider):
                 ok = QMessageBox.question(
-                    self, "No key yet",
-                    "You can add a key later in Settings, but chat won’t work until you "
-                    "do. Continue anyway?",
+                    self, "Not connected yet",
+                    "You can connect later in Settings, but chat won’t work until you do. "
+                    "Continue anyway?",
                 )
                 if ok != QMessageBox.StandardButton.Yes:
                     return
@@ -821,7 +839,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.monitor = monitor
         self.session_id = session_id
-        self.provider = first_connected_provider() or "claude"
+        self.provider = default_provider()
         self.model = PROVIDERS[self.provider]["default_model"]
         self._thread: Optional[ChatThread] = None
         self._stream_label: Optional[QLabel] = None
@@ -1036,15 +1054,15 @@ class MainWindow(QMainWindow):
 
     # -- coach + labels ------------------------------------------------------ #
     def _sync_provider_label(self) -> None:
-        dot = "●" if get_key(self.provider) else "○"
+        dot = "●" if provider_ready(self.provider) else "○"
         self.provider_label.setText(f"{dot} {PROVIDERS[self.provider]['label']} · {self.model}")
 
     def _update_coach(self) -> None:
         n = len(self.monitor.store.get_messages(self.session_id))
-        if not get_key(self.provider):
+        if not provider_ready(self.provider):
             self.coach.setText(
-                f"① Connect your AI to start — open Settings (top right), pick "
-                f"{PROVIDERS[self.provider]['label']}, and paste an API key."
+                "① Connect your AI to start — open Settings (top right). Use your Claude "
+                "subscription (no key) if you have Claude Code, or paste an API key."
             )
         elif n == 0:
             self.coach.setText("② You’re connected. Type your first message below and press Send.")
@@ -1127,7 +1145,7 @@ class MainWindow(QMainWindow):
         text = self.input.toPlainText().strip()
         if not text or (self._thread and self._thread.isRunning()):
             return
-        if not get_key(self.provider):
+        if not provider_ready(self.provider):
             QMessageBox.information(self, "Drifter", "Connect your AI in Settings first.")
             self._open_settings()
             return
@@ -1187,7 +1205,7 @@ class MainWindow(QMainWindow):
     def _send_corrective(self) -> None:
         if (self._thread and self._thread.isRunning()):
             return
-        if not get_key(self.provider):
+        if not provider_ready(self.provider):
             self._open_settings()
             return
         prompt = self.monitor.current_corrective_prompt(self.session_id)
@@ -1268,7 +1286,8 @@ def main() -> int:
     pref = store.get_meta("embedder") or config.EMBEDDER_PREFERENCE
     monitor = DriftMonitor(store=store, embedder=safe_embedder(pref))
 
-    if not any_key_present() and not store.list_sessions():
+    first_run = not load_profile_name() and not store.list_sessions()
+    if first_run:
         dlg: QDialog = OnboardingWizard(monitor)
     else:
         dlg = LaunchDialog(monitor)

@@ -26,7 +26,7 @@ def tmp_data_dir(tmp_path, monkeypatch):
 
 
 def test_provider_registry_shape():
-    assert set(PROVIDERS) == {"claude", "gemini", "openai"}
+    assert {"claude", "gemini", "openai", "claude-cli"} <= set(PROVIDERS)
     for meta in PROVIDERS.values():
         assert {"label", "default_model", "sdk", "pip"} <= set(meta)
 
@@ -34,12 +34,29 @@ def test_provider_registry_shape():
 def test_providers_have_models_and_key_help():
     from cdm.llm import curated_models, key_url
 
-    for p in PROVIDERS:
+    for p, meta in PROVIDERS.items():
         assert curated_models(p), f"{p} has no curated models"
-        assert key_url(p).startswith("https://")
-        assert PROVIDERS[p].get("key_hint")
-        # default model is one of the curated ids
-        assert PROVIDERS[p]["default_model"] in curated_models(p)
+        assert meta.get("key_hint")
+        assert meta["default_model"] in curated_models(p)
+        if not meta.get("keyless"):  # keyless (subscription) providers have no key url
+            assert key_url(p).startswith("https://")
+
+
+def test_keyless_provider_uses_cli(tmp_data_dir, monkeypatch):
+    import cdm.llm as llm
+    from cdm.llm import LLMClient, claude_cli_available, provider_ready
+
+    assert isinstance(claude_cli_available(), bool)
+    # No CLI on PATH -> not ready, and constructing the client raises.
+    monkeypatch.setattr(llm.shutil, "which", lambda _n: None)
+    assert provider_ready("claude-cli") is False
+    with pytest.raises(LLMError):
+        LLMClient("claude-cli")
+    # CLI present -> ready, and the client constructs with no API key.
+    monkeypatch.setattr(llm.shutil, "which", lambda _n: "/usr/bin/claude")
+    assert provider_ready("claude-cli") is True
+    client = LLMClient("claude-cli")
+    assert client.keyless and client.api_key is None
 
 
 def test_list_models_without_key_raises(tmp_data_dir, monkeypatch):

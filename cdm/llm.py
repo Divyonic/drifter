@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -29,6 +31,8 @@ __all__ = [
     "save_key",
     "get_key",
     "key_url",
+    "claude_cli_available",
+    "provider_ready",
     "curated_models",
     "list_models",
     "to_openai_messages",
@@ -46,6 +50,17 @@ class LLMError(RuntimeError):
 # :func:`list_models`, so this stays useful even as new models ship. ``key_url`` is
 # where the user creates an API key; ``key_hint`` is a one-line "where to find it".
 PROVIDERS: Dict[str, dict] = {
+    "claude-cli": {
+        "label": "Claude — your subscription (no key)",
+        "default_model": "sonnet",
+        "sdk": None,
+        "pip": None,
+        "keyless": True,
+        "key_url": "",
+        "key_hint": "Uses your Claude Code login — run `claude` once in a terminal to sign in. No API key, no metered cost.",
+        # Claude Code aliases (robust) plus explicit model IDs.
+        "models": ["sonnet", "opus", "haiku", "claude-opus-4-8", "claude-sonnet-4-6"],
+    },
     "claude": {
         "label": "Claude (Anthropic)",
         "default_model": "claude-sonnet-4-6",
@@ -98,6 +113,19 @@ PROVIDERS: Dict[str, dict] = {
 def key_url(provider: str) -> str:
     """Where to create an API key for ``provider`` (empty string if unknown)."""
     return PROVIDERS.get(provider, {}).get("key_url", "")
+
+
+def claude_cli_available() -> bool:
+    """True if the Claude Code CLI is installed (enables keyless subscription use)."""
+    return shutil.which("claude") is not None
+
+
+def provider_ready(provider: str) -> bool:
+    """True if ``provider`` can be used now: keyless CLI present, or a key is set."""
+    meta = PROVIDERS.get(provider, {})
+    if meta.get("keyless"):
+        return claude_cli_available()
+    return bool(get_key(provider))
 
 
 def curated_models(provider: str) -> List[str]:
@@ -255,16 +283,27 @@ class LLMClient:
                 f"Unknown provider {provider!r}; choose from {list(PROVIDERS)}."
             )
         self.provider = provider
-        self.api_key = api_key or get_key(provider)
+        self.keyless = bool(PROVIDERS[provider].get("keyless"))
         self.model = model or PROVIDERS[provider]["default_model"]
         self.max_tokens = int(max_tokens)
-        if not self.api_key:
-            raise LLMError(
-                f"No API key for {PROVIDERS[provider]['label']}. Add one in Settings."
-            )
+        if self.keyless:
+            self.api_key = None
+            if not claude_cli_available():
+                raise LLMError(
+                    "Claude Code CLI not found. Install it and run `claude` once in a "
+                    "terminal to sign in to your subscription."
+                )
+        else:
+            self.api_key = api_key or get_key(provider)
+            if not self.api_key:
+                raise LLMError(
+                    f"No API key for {PROVIDERS[provider]['label']}. Add one in Settings."
+                )
 
     def chat(self, messages: List[dict], system: Optional[str] = None) -> str:
         """Return the assistant reply for ``messages`` (optional ``system`` prompt)."""
+        if self.provider == "claude-cli":
+            return self._chat_claude_cli(messages, system)
         if self.provider == "claude":
             return self._chat_claude(messages, system)
         if self.provider == "gemini":
@@ -284,6 +323,12 @@ class LLMClient:
         """
         on_chunk = on_chunk or (lambda _s: None)
         should_stop = should_stop or (lambda: False)
+        if self.provider == "claude-cli":
+            # The CLI returns the full reply; surface it as a single chunk.
+            full = self._chat_claude_cli(messages, system)
+            if full:
+                on_chunk(full)
+            return full
         if self.provider == "claude":
             return self._stream_claude(messages, system, on_chunk, should_stop)
         if self.provider == "gemini":
@@ -432,3 +477,29 @@ class LLMClient:
             raise
         except Exception as exc:
             raise LLMError(f"Gemini request failed: {exc}") from exc
+
+    # -- keyless: drive the local Claude Code CLI (uses the user's subscription) #
+    def _chat_claude_cli(self, messages, system) -> str:
+        exe = shutil.which("claude")
+        if not exe:
+            raise LLMError("Claude Code CLI not found on PATH.")
+        # Flatten the conversation into a single prompt the CLI can answer.
+        parts: List[str] = []
+        if system:
+            parts.append(system.strip())
+        for m in to_anthropic_messages(messages):
+            who = "User" if m["role"] == "user" else "Assistant"
+            parts.append(f"{who}: {m['content']}")
+        parts.append("Assistant:")
+        prompt = "\n\n".join(parts)
+        cmd = [exe, "-p", prompt, "--output-format", "text"]
+        if self.model:
+            cmd += ["--model", self.model]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+        except Exception as exc:
+            raise LLMError(f"Claude Code call failed: {exc}") from exc
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()[:300]
+            raise LLMError(f"Claude Code error: {detail or 'non-zero exit'}")
+        return (proc.stdout or "").strip()
