@@ -233,7 +233,15 @@ def safe_embedder(preference: str):
 # Drift chart (palette-aware area chart)
 # --------------------------------------------------------------------------- #
 class DriftChart(pg.PlotWidget):
-    """Minimal area chart: accent = drift vs anchor, muted dashed = vs reference."""
+    """Drift chart with a learned baseline band, changepoint marker and forecast.
+
+    - orange line + fill: drift vs your goal
+    - grey dashed: drift vs recent context
+    - shaded band: the 'normal' range learned from the start of this chat
+    - vertical dashed line: where a sustained shift began (changepoint)
+    - dashed projection + label: forecast of when drift crosses the threshold
+    - red dotted line: the alert threshold
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -249,24 +257,65 @@ class DriftChart(pg.PlotWidget):
         self.getAxis("left").setLabel("drift", color=C["muted"])
         self.getAxis("bottom").setLabel("turn", color=C["muted"])
 
+        mut = QColor(C["muted"])
+        self._band = pg.LinearRegionItem(
+            orientation="horizontal", movable=False,
+            brush=pg.mkBrush(mut.red(), mut.green(), mut.blue(), 28), pen=pg.mkPen(None),
+        )
+        self._band.setZValue(-10)
+        self.addItem(self._band)
+        self._band.hide()
+
         accent = QColor(C["accent"])
         self._anchor = self.plot(
             [], [], pen=pg.mkPen(C["accent"], width=2.5),
             fillLevel=0, brush=pg.mkBrush(accent.red(), accent.green(), accent.blue(), 28),
             symbol="o", symbolSize=5, symbolBrush=C["accent"], symbolPen=None,
         )
-        self._reference = self.plot(
-            [], [], pen=pg.mkPen(C["muted"], width=1.6, style=Qt.DashLine)
-        )
-        self._threshold = pg.InfiniteLine(
-            angle=0, pen=pg.mkPen(C["danger"], width=1.2, style=Qt.DotLine)
-        )
+        self._reference = self.plot([], [], pen=pg.mkPen(C["muted"], width=1.6, style=Qt.DashLine))
+        self._forecast = self.plot([], [], pen=pg.mkPen(C["accent"], width=1.4, style=Qt.DashLine))
+        self._threshold = pg.InfiniteLine(angle=0, pen=pg.mkPen(C["danger"], width=1.2, style=Qt.DotLine))
         self.addItem(self._threshold)
+        self._cp = pg.InfiniteLine(angle=90, pen=pg.mkPen(C["muted"], width=1.0, style=Qt.DashLine))
+        self.addItem(self._cp)
+        self._cp.hide()
+        self._fc_text = pg.TextItem(color=C["accent"], anchor=(0, 1))
+        self.addItem(self._fc_text)
+        self._fc_text.hide()
 
-    def update_series(self, turns, anchor, reference, threshold: float) -> None:
-        self._anchor.setData(list(turns), list(anchor))
-        self._reference.setData(list(turns), list(reference))
-        self._threshold.setValue(float(threshold))
+    def update(self, ts: dict) -> None:
+        turns = list(ts.get("turns") or [])
+        anchor = list(ts.get("drift_from_anchor") or [])
+        reference = list(ts.get("drift_from_reference") or [])
+        threshold = float(ts.get("threshold", 0.65))
+        self._anchor.setData(turns, anchor)
+        self._reference.setData(turns, reference)
+        self._threshold.setValue(threshold)
+
+        mean, std = ts.get("baseline_mean"), ts.get("baseline_std")
+        if mean is not None and std is not None and len(turns) >= 2:
+            self._band.setRegion([max(0.0, mean - std), mean + std])
+            self._band.show()
+        else:
+            self._band.hide()
+
+        cp = ts.get("changepoint_turn")
+        if cp is not None:
+            self._cp.setValue(cp)
+            self._cp.show()
+        else:
+            self._cp.hide()
+
+        fc = ts.get("forecast_turns")
+        if turns and anchor and fc and fc > 0:
+            x0, y0 = turns[-1], anchor[-1]
+            self._forecast.setData([x0, x0 + fc], [y0, threshold])
+            self._fc_text.setText(f"~{fc:.0f} turns to drift")
+            self._fc_text.setPos(x0, min(1.0, threshold + 0.07))
+            self._fc_text.show()
+        else:
+            self._forecast.setData([], [])
+            self._fc_text.hide()
 
 
 # --------------------------------------------------------------------------- #
@@ -1092,7 +1141,16 @@ class MainWindow(QMainWindow):
         self.threshold_spin.setRange(0.30, 0.95)
         self.threshold_spin.setSingleStep(0.01)
         self.threshold_spin.setValue(round(self.monitor.threshold, 2))
+        self.threshold_spin.setToolTip(
+            "How far the conversation may drift from your goal before Drifter warns you.\n"
+            "Lower = stricter. Drift: 0 = on goal, 1 = unrelated."
+        )
         self.threshold_spin.valueChanged.connect(self._on_threshold)
+        help_btn = QPushButton("?")
+        help_btn.setObjectName("link")
+        help_btn.setFixedWidth(26)
+        help_btn.setToolTip("What does the threshold mean?")
+        help_btn.clicked.connect(self._explain_threshold)
         self.auto_check = QCheckBox("Auto re-align")
         self.auto_check.setChecked(True)
         self.clip_check = QCheckBox("Capture clipboard")
@@ -1100,10 +1158,28 @@ class MainWindow(QMainWindow):
         self.clip_check.toggled.connect(self._on_clip_toggle)
         th_row.addWidget(th_lbl)
         th_row.addWidget(self.threshold_spin)
+        th_row.addWidget(help_btn)
         th_row.addStretch(1)
         th_row.addWidget(self.auto_check)
         th_row.addWidget(self.clip_check)
         lay.addLayout(th_row)
+
+        legend = QLabel(
+            f"<span style='color:{C['accent']}'>●</span> vs your goal &nbsp;&nbsp;"
+            f"<span style='color:{C['muted']}'>●</span> vs recent context &nbsp;&nbsp;"
+            f"<span style='color:{C['danger']}'>●</span> alert threshold &nbsp;&nbsp;"
+            f"<span style='color:{C['muted']}'>▭</span> normal range"
+        )
+        legend.setTextFormat(Qt.RichText)
+        lay.addWidget(legend)
+        explain = QLabel(
+            "Drift 0 = right on your goal · 1 = unrelated. Above the red line = off-track; "
+            "the shaded band is what’s normal for this chat, so rising above it signals a "
+            "real shift, not noise."
+        )
+        explain.setObjectName("muted")
+        explain.setWordWrap(True)
+        lay.addWidget(explain)
 
         self.corr_card = QFrame()
         self.corr_card.setObjectName("card")
@@ -1227,6 +1303,20 @@ class MainWindow(QMainWindow):
             self.model = model or PROVIDERS[provider]["default_model"]
             self._sync_provider_label()
             self._update_coach()
+
+    def _explain_threshold(self) -> None:
+        QMessageBox.information(
+            self, "What the threshold means",
+            "Drift is how far the conversation has moved from your original goal — "
+            "0 means right on it, 1 means completely unrelated.\n\n"
+            "The threshold (red line) is how much drift you'll tolerate before Drifter "
+            "warns you and offers a corrective prompt. Lower = stricter.\n\n"
+            "Defaults: 0.65 in semantic mode, 0.80 in fast offline mode (its numbers run "
+            "higher).\n\n"
+            "The shaded band is the ‘normal’ range learned from the start of THIS "
+            "conversation, so a rise above the band is a genuine shift rather than noise. "
+            "The dashed projection forecasts when drift will cross the threshold.",
+        )
 
     def _on_threshold(self, value: float) -> None:
         self.monitor.set_threshold(float(value))
@@ -1363,7 +1453,7 @@ class MainWindow(QMainWindow):
         anchor = ts.get("drift_from_anchor") or []
         reference = ts.get("drift_from_reference") or []
         threshold = float(ts.get("threshold", self.monitor.threshold))
-        self.chart.update_series(turns, anchor, reference, threshold)
+        self.chart.update(ts)
         last = anchor[-1] if anchor else 0.0
         high = bool(turns) and (last > threshold)
         self.metric.setText(f"drift {last:.3f} · {len(turns)} turns")

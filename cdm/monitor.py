@@ -18,7 +18,13 @@ from uuid import uuid4
 
 from cdm import config
 from cdm.corrective import render_corrective_prompt
-from cdm.drift import DriftEngine
+from cdm.drift import (
+    DriftEngine,
+    baseline_stats,
+    biggest_jump,
+    cusum_changepoint,
+    forecast_cross,
+)
 from cdm.embeddings import Embedder, get_embedder
 from cdm.goal_state import extract_goal_state, goal_state_text
 from cdm.models import DriftScore, GoalState, Message, Session
@@ -279,14 +285,35 @@ class DriftMonitor:
                 reference_series.append(0.0)
 
         smoothing = config.SMOOTHING_WINDOW
+        anchor_s = self.engine.smooth(anchor_series, smoothing)
+        reference_s = self.engine.smooth(reference_series, smoothing)
+
+        # Self-calibrating analytics. Changepoint/attribution run on the RAW series
+        # (smoothing flattens the baseline and the step, distorting detection);
+        # the forecast uses the smoothed series for a stable trend.
+        mean, std = baseline_stats(anchor_series, k=4)
+        cp_idx = cusum_changepoint(anchor_series, mean, std)
+        jump_idx = biggest_jump(anchor_series)
+        forecast = forecast_cross(anchor_s, self.threshold)
+
+        def _turn_at(idx):
+            return turns[idx] if (idx is not None and 0 <= idx < len(turns)) else None
+
         return {
             "turns": turns,
             "roles": roles,
             "texts": texts,
-            "drift_from_anchor": self.engine.smooth(anchor_series, smoothing),
-            "drift_from_reference": self.engine.smooth(reference_series, smoothing),
+            "drift_from_anchor": anchor_s,
+            "drift_from_reference": reference_s,
             "threshold": self.threshold,
             "alignment_events": alignment_events,
+            # analytics
+            "baseline_mean": mean,
+            "baseline_std": std,
+            "changepoint_turn": _turn_at(cp_idx),
+            "attribution_turn": _turn_at(jump_idx),
+            "forecast_turns": forecast,
+            "forecast_will_cross": bool(forecast is not None and forecast > 0),
         }
 
     def current_corrective_prompt(self, session_id: str) -> str:

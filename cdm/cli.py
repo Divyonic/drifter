@@ -59,6 +59,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub.add_parser("app", help="Alias for 'run'.")
     sub.add_parser("web", help="Launch the Streamlit browser app (localhost-only).")
     sub.add_parser("watch", help="Run the clipboard auto-capture watcher.")
+    sub.add_parser("hook", help="Claude Code UserPromptSubmit hook (reads stdin).")
+    sub.add_parser("eval", help="Run the drift-detection eval on a synthetic corpus.")
     sub.add_parser("version", help="Print the installed version.")
 
     args, extra = parser.parse_known_args(argv)
@@ -72,6 +74,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         from cdm.watcher import main as watch_main
 
         return watch_main()
+    if command == "hook":
+        from cdm.hook import main as hook_main
+
+        return hook_main()
+    if command == "eval":
+        from cdm.eval import main as eval_main
+
+        return eval_main()
     if command == "version":
         from cdm import __version__
 

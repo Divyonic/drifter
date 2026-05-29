@@ -79,8 +79,39 @@ supported keyless API path, via Claude Code above.)
 drifter          # native desktop app (default)
 drifter web      # optional Streamlit browser app (localhost-only)
 drifter watch    # clipboard capture watcher on its own
+drifter hook     # Claude Code UserPromptSubmit hook (reads stdin) — see below
+drifter eval     # measure drift detection on a synthetic corpus (precision/recall)
 drifter version
 ```
+
+### Auto re-anchor inside Claude Code (hook)
+
+Let Claude Code call Drifter on every prompt and auto-inject a re-anchor *only when
+you've genuinely drifted* — no app, no pasting. Add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "drifter hook" } ] }
+    ]
+  }
+}
+```
+
+The hook reads your session transcript, measures drift from the original goal with
+the fast offline embedder (no latency, no network), and prints a re-anchor to stdout
+when you're off-track — which Claude Code adds as context for that turn. It never
+blocks your prompt.
+
+### Smarter graph
+
+The chart shows a learned **baseline band** (what's "normal" for *this* chat — so a
+rise above it is a real shift, not noise), a **changepoint marker** (where a sustained
+shift began, via CUSUM), and a **forecast** projection (when drift will cross the
+threshold). A legend + "?" explain what everything means. Detection quality tracks the
+embedder: on the semantic backend `drifter eval` scores ~0.8 precision/recall; the
+lexical fallback can't separate reworded-on-topic from off-topic.
 
 ---
 

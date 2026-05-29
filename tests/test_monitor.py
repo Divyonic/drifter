@@ -144,7 +144,7 @@ def test_timeseries_shape_and_smoothing(tmp_path):
     ts = mon.timeseries(session.session_id)
     n = len(ON_TOPIC) + len(OFF_TOPIC)
 
-    assert set(ts.keys()) == {
+    assert {
         "turns",
         "roles",
         "texts",
@@ -152,7 +152,7 @@ def test_timeseries_shape_and_smoothing(tmp_path):
         "drift_from_reference",
         "threshold",
         "alignment_events",
-    }
+    } <= set(ts.keys())
     # All parallel series share the same length (one per stored turn).
     assert ts["turns"] == list(range(n))
     assert len(ts["roles"]) == n
