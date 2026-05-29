@@ -224,3 +224,57 @@ def test_mark_checkpoint_adds_goal_state_revision(tmp_path):
 def test_latest_goal_state_none_for_unknown_session(tmp_path):
     mon = _monitor(tmp_path)
     assert mon.latest_goal_state("nope") is None
+
+
+# --- self-calibrating per-turn verdict (used by the Claude Code hook) --------- #
+
+def _session_with_series(tmp_path, anchor_drifts):
+    """Create a session and insert a controlled drift-from-anchor series.
+
+    Drift scores are written directly so the detection logic can be tested
+    independently of any embedder's quality.
+    """
+    mon = _monitor(tmp_path)
+    sid = mon.start_session("calib", ANCHOR, []).session_id
+    for i, d in enumerate(anchor_drifts):
+        mon.store.add_drift_score(DriftScore(
+            turn_id=i, session_id=sid,
+            drift_from_reference=d, drift_from_anchor=d, is_drift_high=False,
+        ))
+    return mon, sid
+
+
+def test_calibrated_fires_on_sustained_drift(tmp_path):
+    # Flat low baseline, then a sustained upward shift.
+    mon, sid = _session_with_series(
+        tmp_path, [0.10, 0.12, 0.09, 0.11, 0.55, 0.60, 0.58, 0.62])
+    v = mon.is_drifting_calibrated(sid)
+    assert v["high"] is True
+    assert v["changepoint_turn"] is not None
+
+
+def test_calibrated_quiet_on_flat_high_baseline(tmp_path):
+    # On-goal throughout, but at a high *stable* distance band (mimics hashing,
+    # where on/off-goal turns share a band). A flat series never alarms.
+    mon, sid = _session_with_series(
+        tmp_path, [0.88, 0.90, 0.87, 0.91, 0.89, 0.90, 0.88, 0.92])
+    assert mon.is_drifting_calibrated(sid)["high"] is False
+
+
+def test_calibrated_ignores_one_off_spike(tmp_path):
+    # A single high turn that returns to baseline is a tangent, not a regime change.
+    mon, sid = _session_with_series(
+        tmp_path, [0.10, 0.12, 0.09, 0.11, 0.70, 0.10, 0.12, 0.09])
+    assert mon.is_drifting_calibrated(sid)["high"] is False
+
+
+def test_calibrated_clears_when_back_on_track(tmp_path):
+    # Drifted for a stretch, then the latest turn returns to baseline -> cleared.
+    mon, sid = _session_with_series(
+        tmp_path, [0.10, 0.11, 0.09, 0.12, 0.60, 0.62, 0.58, 0.10])
+    assert mon.is_drifting_calibrated(sid)["high"] is False
+
+
+def test_calibrated_quiet_when_history_too_short(tmp_path):
+    mon, sid = _session_with_series(tmp_path, [0.10, 0.80])
+    assert mon.is_drifting_calibrated(sid)["high"] is False

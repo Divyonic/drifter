@@ -316,6 +316,58 @@ class DriftMonitor:
             "forecast_will_cross": bool(forecast is not None and forecast > 0),
         }
 
+    def is_drifting_calibrated(
+        self, session_id: str, k_turn: float = 1.0, min_history: int = 4
+    ) -> Dict[str, Any]:
+        """Self-calibrating drift verdict for the *latest* turn of a session.
+
+        The raw per-turn :attr:`DriftScore.is_drift_high` flag compares a single
+        turn's cosine distance against a fixed absolute threshold. That fires on
+        any lexically-divergent-but-on-goal prompt (a short "add a --header flag"
+        scores far from a goal sentence), which makes it unusable as a per-prompt
+        alarm — especially with the hashing embedder, where on-goal and off-goal
+        turns occupy the same distance band.
+
+        This instead learns what "normal" drift looks like for *this* conversation
+        (:func:`baseline_stats`) and reports drift only when the series has
+        *sustainedly* departed that baseline (:func:`cusum_changepoint`) **and**
+        the most recent turn is itself still elevated above it — so returning to
+        the goal clears the alert instead of nagging on every later turn. It is
+        the same detector :meth:`timeseries` and the eval harness use, so the
+        per-prompt verdict is consistent with the chart the user sees.
+
+        Args:
+            session_id: Target session id.
+            k_turn: How many baseline std-devs above the baseline mean the latest
+                turn must sit to count as "still drifting".
+            min_history: Minimum number of scored turns required before any
+                verdict is given; below this the conversation is too young to
+                have a meaningful baseline, so it is reported as on-track.
+
+        Returns:
+            ``{"high": bool, "drift": float, "changepoint_turn": int | None,
+            "baseline_mean": float, "baseline_std": float}``.
+        """
+        scores = sorted(
+            self.store.get_drift_scores(session_id), key=lambda s: s.turn_id
+        )
+        series = [float(s.drift_from_anchor) for s in scores]
+        out: Dict[str, Any] = {
+            "high": False,
+            "drift": series[-1] if series else 0.0,
+            "changepoint_turn": None,
+            "baseline_mean": 0.0,
+            "baseline_std": 0.0,
+        }
+        if len(series) < min_history:
+            return out  # too early to judge drift against a baseline
+        mean, std = baseline_stats(series, k=4)
+        cp = cusum_changepoint(series, mean, std)
+        last = series[-1]
+        out.update(baseline_mean=mean, baseline_std=std, changepoint_turn=cp)
+        out["high"] = cp is not None and last > mean + k_turn * std
+        return out
+
     def current_corrective_prompt(self, session_id: str) -> str:
         """Render the corrective prompt from the latest goal state.
 
@@ -328,7 +380,8 @@ class DriftMonitor:
         """
         latest = self.store.get_latest_goal_state(session_id)
         raw = latest.raw if latest is not None else {}
-        return render_corrective_prompt(raw)
+        # Threshold-aware: stricter threshold -> tighter re-anchor wording.
+        return render_corrective_prompt(raw, threshold=self.threshold)
 
     def latest_goal_state(self, session_id: str) -> Optional[GoalState]:
         """Return the most recent goal state for a session, or ``None``."""

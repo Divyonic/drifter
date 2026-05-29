@@ -132,6 +132,12 @@ overrides the raw distance signal. It's **on by default whenever a provider is
 connected**, and falls back to the offline engine when one isn't. Toggle in
 **Settings → Smart analysis**.
 
+**The corrective prompt adapts to your threshold.** Lower the threshold and the
+re-anchor demands tighter focus (pull the conversation right back to the exact goal);
+raise it and it allows broader exploration. Drag the threshold to an extreme and
+Drifter warns you — e.g. a very low value can force the conversation into a very niche
+slice of your goal.
+
 ### Smarter graph
 
 The chart shows a learned **baseline band** (what's "normal" for *this* chat — so a

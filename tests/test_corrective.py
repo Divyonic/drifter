@@ -87,6 +87,22 @@ def test_uses_template_structure() -> None:
     assert "{current_focus}" in CORRECTIVE_TEMPLATE
 
 
+def test_strictness_line_varies_with_threshold() -> None:
+    from cdm.corrective import strictness_line
+
+    assert "tightly" in strictness_line(0.40).lower()      # strict
+    assert "broad" in strictness_line(0.85).lower()        # loose
+    assert "focused" in strictness_line(0.65).lower()      # balanced
+
+
+def test_render_appends_strictness_only_when_threshold_given() -> None:
+    raw = {"core_goal": "g", "current_focus": "f"}
+    out_none = render_corrective_prompt(raw)
+    out_strict = render_corrective_prompt(raw, threshold=0.40)
+    assert "tightly" not in out_none.lower()               # unchanged without threshold
+    assert "tightly" in out_strict.lower() and out_strict != out_none
+
+
 def test_corrective_prompt_avoids_injection_phrasing() -> None:
     """The corrective prompt must read as the user speaking, not a system override —
     otherwise the assistant flags it as a prompt-injection attempt and refuses."""

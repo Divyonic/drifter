@@ -62,6 +62,7 @@ from PySide6.QtWidgets import (
 
 from cdm import claude_code as cc
 from cdm import config
+from cdm.corrective import strictness_line
 from cdm.embeddings import get_embedder
 from cdm.llm import (
     PROVIDERS,
@@ -1425,6 +1426,7 @@ class MainWindow(QMainWindow):
         self._update_coach()
         self._update_buttons()
         self._update_theme_btn()
+        self._update_threshold_warning(self.monitor.threshold)
 
         self._timer = QTimer(self)
         self._timer.setInterval(1500)
@@ -1594,6 +1596,12 @@ class MainWindow(QMainWindow):
         th_row.addWidget(self.auto_check)
         th_row.addWidget(self.clip_check)
         lay.addLayout(th_row)
+
+        self.threshold_warn = QLabel("")
+        self.threshold_warn.setObjectName("coach")  # highlighted box
+        self.threshold_warn.setWordWrap(True)
+        self.threshold_warn.setVisible(False)
+        lay.addWidget(self.threshold_warn)
 
         legend = QLabel(
             f"<span style='color:{C['accent']}'>●</span> <b>orange</b> = drift from your "
@@ -1787,9 +1795,25 @@ class MainWindow(QMainWindow):
             "The dashed projection forecasts when drift will cross the threshold.",
         )
 
+    def _update_threshold_warning(self, value: float) -> None:
+        if value <= 0.42:
+            self.threshold_warn.setText(
+                "⚠️ Very strict — almost any tangent counts as drift. This can force the "
+                "conversation into a very niche slice of your goal."
+            )
+            self.threshold_warn.setVisible(True)
+        elif value >= 0.90:
+            self.threshold_warn.setText(
+                "⚠️ Very loose — drift will rarely be flagged, so off-track turns may slip by."
+            )
+            self.threshold_warn.setVisible(True)
+        else:
+            self.threshold_warn.setVisible(False)
+
     def _on_threshold(self, value: float) -> None:
         self.monitor.set_threshold(float(value))
-        self._refresh_chart()
+        self._update_threshold_warning(value)
+        self._refresh_chart()  # re-renders the (now threshold-aware) corrective
 
     def _on_clip_toggle(self, on: bool) -> None:
         if on:
@@ -1940,7 +1964,11 @@ class MainWindow(QMainWindow):
         if v["status"] == "drifting":
             self.chip.setText("DRIFTING")
             self.chip.setObjectName("chipBad")
-            corr = v.get("corrective") or self.monitor.current_corrective_prompt(self.session_id)
+            base = v.get("corrective")
+            if base:  # LLM-written corrective — add the threshold-tuned tightness line
+                corr = base + "\n\n" + strictness_line(self.monitor.threshold)
+            else:  # offline corrective is already threshold-aware
+                corr = self.monitor.current_corrective_prompt(self.session_id)
             self.corr_text.setPlainText(corr)
             self.corr_card.setVisible(True)
         else:

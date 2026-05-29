@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-__all__ = ["CORRECTIVE_TEMPLATE", "render_corrective_prompt"]
+__all__ = ["CORRECTIVE_TEMPLATE", "render_corrective_prompt", "strictness_line"]
 
 
 CORRECTIVE_TEMPLATE: str = """Quick refocus — I want to make sure we stay on track with what I'm actually trying to do here.
@@ -45,7 +45,33 @@ def _bullet_list(items: Any) -> str:
     return "\n".join(bullets)
 
 
-def render_corrective_prompt(goal_state_raw: Dict[str, Any]) -> str:
+def strictness_line(threshold: float) -> str:
+    """A tolerance instruction tuned to the user's threshold.
+
+    The threshold is how tightly the user wants to stay on goal, so the corrective
+    asks the assistant to pull the conversation back to *that* tightness — stricter
+    threshold, tighter adherence.
+    """
+    t = float(threshold)
+    if t <= 0.45:
+        return (
+            "Hold us tightly to this exact goal right now: treat even small tangents as "
+            "off-track and steer straight back — I want minimal deviation."
+        )
+    if t >= 0.78:
+        return (
+            "Keep this goal as the anchor — broad, exploratory detours are fine as long as "
+            "they ultimately serve it."
+        )
+    return (
+        "Stay focused on this goal: brief, relevant detours are okay, but bring us back "
+        "promptly if we wander."
+    )
+
+
+def render_corrective_prompt(
+    goal_state_raw: Dict[str, Any], threshold: float = None
+) -> str:
     """Fill :data:`CORRECTIVE_TEMPLATE` from a goal-state raw dict.
 
     Missing keys are tolerated. ``constraints`` and ``decisions`` are formatted
@@ -59,9 +85,12 @@ def render_corrective_prompt(goal_state_raw: Dict[str, Any]) -> str:
     constraints = _bullet_list(raw.get("constraints"))
     decisions = _bullet_list(raw.get("decisions"))
 
-    return CORRECTIVE_TEMPLATE.format(
+    out = CORRECTIVE_TEMPLATE.format(
         core_goal=core_goal,
         constraints=constraints,
         decisions=decisions,
         current_focus=current_focus,
     )
+    if threshold is not None:
+        out += "\n\n" + strictness_line(threshold)
+    return out
