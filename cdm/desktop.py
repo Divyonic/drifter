@@ -155,6 +155,13 @@ def _md_to_html(text: str) -> str:
         return "<span>" + _html.escape(text or "").replace("\n", "<br>") + "</span>"
 
 
+def _rgba(hex_color: str, alpha: int) -> QColor:
+    """A QColor from a hex string with an explicit alpha (0-255)."""
+    c = QColor(hex_color)
+    c.setAlpha(alpha)
+    return c
+
+
 def _shadow(widget: QWidget, blur: int = 30, dy: int = 8, alpha: int = 26) -> QWidget:
     eff = QGraphicsDropShadowEffect(widget)
     eff.setBlurRadius(blur)
@@ -243,36 +250,47 @@ class DriftChart(pg.PlotWidget):
     - red dotted line: the alert threshold
     """
 
+    # Show per-point markers only for short conversations (clutter otherwise).
+    _MARKER_LIMIT = 30
+
     def __init__(self) -> None:
         super().__init__()
         self.setBackground(C["bg"])
         self.setMenuEnabled(False)
-        self.setMouseEnabled(x=False, y=False)
+        self.setMouseEnabled(x=True, y=True)   # scroll to zoom, drag to pan
+        self.setLimits(yMin=-0.05, yMax=1.08)
         self.hideButtons()
         self.setYRange(0, 1.0, padding=0.02)
-        self.showGrid(x=False, y=True, alpha=0.10)
+        self.showGrid(x=False, y=True, alpha=0.08)
         for ax in ("left", "bottom"):
             self.getAxis(ax).setTextPen(C["muted"])
             self.getAxis(ax).setPen(C["line_soft"])
         self.getAxis("left").setLabel("drift", color=C["muted"])
         self.getAxis("bottom").setLabel("turn", color=C["muted"])
 
+        dgr = QColor(C["danger"])
+        self._danger = pg.LinearRegionItem(
+            orientation="horizontal", movable=False,
+            brush=pg.mkBrush(dgr.red(), dgr.green(), dgr.blue(), 18), pen=pg.mkPen(None),
+        )
+        self._danger.setZValue(-20)
+        self.addItem(self._danger)
+
         mut = QColor(C["muted"])
         self._band = pg.LinearRegionItem(
             orientation="horizontal", movable=False,
-            brush=pg.mkBrush(mut.red(), mut.green(), mut.blue(), 28), pen=pg.mkPen(None),
+            brush=pg.mkBrush(mut.red(), mut.green(), mut.blue(), 22), pen=pg.mkPen(None),
         )
         self._band.setZValue(-10)
         self.addItem(self._band)
         self._band.hide()
 
-        accent = QColor(C["accent"])
-        self._anchor = self.plot(
-            [], [], pen=pg.mkPen(C["accent"], width=2.5),
-            fillLevel=0, brush=pg.mkBrush(accent.red(), accent.green(), accent.blue(), 28),
-            symbol="o", symbolSize=5, symbolBrush=C["accent"], symbolPen=None,
-        )
-        self._reference = self.plot([], [], pen=pg.mkPen(C["muted"], width=1.6, style=Qt.DashLine))
+        self._anchor = self.plot([], [], pen=pg.mkPen(C["accent"], width=2.2))
+        self._anchor.setClipToView(True)
+        self._anchor.setDownsampling(auto=True)
+        self._reference = self.plot([], [], pen=pg.mkPen(_rgba(C["muted"], 150), width=1.0))
+        self._reference.setClipToView(True)
+        self._reference.setDownsampling(auto=True)
         self._forecast = self.plot([], [], pen=pg.mkPen(C["accent"], width=1.4, style=Qt.DashLine))
         self._threshold = pg.InfiniteLine(angle=0, pen=pg.mkPen(C["danger"], width=1.2, style=Qt.DotLine))
         self.addItem(self._threshold)
@@ -283,17 +301,88 @@ class DriftChart(pg.PlotWidget):
         self.addItem(self._fc_text)
         self._fc_text.hide()
 
+        # Hover crosshair + info tooltip.
+        self._cross_v = pg.InfiniteLine(angle=90, pen=pg.mkPen(_rgba(C["muted"], 110), width=1))
+        self._cross_h = pg.InfiniteLine(angle=0, pen=pg.mkPen(_rgba(C["muted"], 110), width=1))
+        for ln in (self._cross_v, self._cross_h):
+            ln.setZValue(40)
+            self.addItem(ln)
+            ln.hide()
+        self._hover = pg.TextItem(
+            anchor=(0, 1), color=C["ink"],
+            fill=_rgba(C["panel"], 240), border=pg.mkPen(_rgba(C["line"], 255)),
+        )
+        self._hover.setZValue(60)
+        self.addItem(self._hover)
+        self._hover.hide()
+        # series cache for hover lookups
+        self._turns: list = []
+        self._avals: list = []
+        self._rvals: list = []
+        self._roles: list = []
+        self._texts: list = []
+        self.scene().sigMouseMoved.connect(self._on_mouse_moved)
+
+    def _on_mouse_moved(self, pos) -> None:
+        if not self._turns or not self.sceneBoundingRect().contains(pos):
+            self._cross_v.hide()
+            self._cross_h.hide()
+            self._hover.hide()
+            return
+        mp = self.getViewBox().mapSceneToView(pos)
+        x = mp.x()
+        idx = min(range(len(self._turns)), key=lambda i: abs(self._turns[i] - x))
+        turn = self._turns[idx]
+        a = self._avals[idx] if idx < len(self._avals) else 0.0
+        r = self._rvals[idx] if idx < len(self._rvals) else 0.0
+        role = self._roles[idx] if idx < len(self._roles) else ""
+        text = self._texts[idx] if idx < len(self._texts) else ""
+        snippet = (text[:52] + "…") if len(text) > 52 else text
+        self._cross_v.setPos(turn)
+        self._cross_h.setPos(a)
+        self._cross_v.show()
+        self._cross_h.show()
+        # flip the tooltip to the left near the right edge so it stays on-screen
+        rng = self.getViewBox().viewRange()[0]
+        anchor_x = 1.0 if (rng[1] - turn) < (rng[1] - rng[0]) * 0.35 else 0.0
+        self._hover.setAnchor((anchor_x, 1))
+        self._hover.setText(
+            f"turn {turn} · {role}\ndrift {a:.2f}  ·  ref {r:.2f}"
+            + (f"\n{snippet}" if snippet else "")
+        )
+        self._hover.setPos(turn, min(1.05, a + 0.04))
+        self._hover.show()
+
+    def reset_view(self) -> None:
+        """Reset zoom/pan to the full series with the standard 0–1 drift range."""
+        try:
+            self.getViewBox().autoRange(padding=0.04)
+        except Exception:
+            pass
+        self.setYRange(0, 1.0, padding=0.02)
+
     def update(self, ts: dict) -> None:
         turns = list(ts.get("turns") or [])
         anchor = list(ts.get("drift_from_anchor") or [])
         reference = list(ts.get("drift_from_reference") or [])
         threshold = float(ts.get("threshold", 0.65))
-        self._anchor.setData(turns, anchor)
+        self._turns, self._avals, self._rvals = turns, anchor, reference
+        self._roles = list(ts.get("roles") or [])
+        self._texts = list(ts.get("texts") or [])
+
+        # markers only when few points, so a long chat stays clean
+        if turns and len(turns) <= self._MARKER_LIMIT:
+            self._anchor.setData(turns, anchor, symbol="o", symbolSize=5,
+                                 symbolBrush=C["accent"], symbolPen=None)
+        else:
+            self._anchor.setData(turns, anchor, symbol=None)
         self._reference.setData(turns, reference)
         self._threshold.setValue(threshold)
+        self._danger.setRegion([threshold, 1.08])  # subtle "off-track" zone
 
+        # Baseline band only when it's tight enough to be meaningful (else it floods).
         mean, std = ts.get("baseline_mean"), ts.get("baseline_std")
-        if mean is not None and std is not None and len(turns) >= 2:
+        if mean is not None and std is not None and std <= 0.18 and len(turns) >= 3:
             self._band.setRegion([max(0.0, mean - std), mean + std])
             self._band.show()
         else:
@@ -311,7 +400,7 @@ class DriftChart(pg.PlotWidget):
             x0, y0 = turns[-1], anchor[-1]
             self._forecast.setData([x0, x0 + fc], [y0, threshold])
             self._fc_text.setText(f"~{fc:.0f} turns to drift")
-            self._fc_text.setPos(x0, min(1.0, threshold + 0.07))
+            self._fc_text.setPos(x0, min(1.05, threshold + 0.07))
             self._fc_text.show()
         else:
             self._forecast.setData([], [])
@@ -596,6 +685,9 @@ class OnboardingWizard(QDialog):
             return
         if i == 1:
             self.provider, self.model, _ = self.setup.persist()
+            self.model = self.model or PROVIDERS[self.provider]["default_model"]
+            self.monitor.store.set_meta("provider", self.provider)
+            self.monitor.store.set_meta("model", self.model)
             if not provider_ready(self.provider):
                 ok = QMessageBox.question(
                     self, "Not connected yet",
@@ -974,8 +1066,15 @@ class LaunchDialog(QDialog):
         self.accept()
 
     def _connect(self) -> None:
-        provider = first_connected_provider() or "claude"
-        SettingsDialog(provider, PROVIDERS[provider]["default_model"], self.monitor.store, self).exec()
+        provider = self.monitor.store.get_meta("provider") or first_connected_provider() or "claude"
+        if provider not in PROVIDERS:
+            provider = "claude"
+        model = self.monitor.store.get_meta("model") or PROVIDERS[provider]["default_model"]
+        dlg = SettingsDialog(provider, model, self.monitor.store, self)
+        if dlg.exec() == QDialog.Accepted:
+            p, m, _ = dlg.result_values()
+            self.monitor.store.set_meta("provider", p)
+            self.monitor.store.set_meta("model", m or PROVIDERS[p]["default_model"])
 
     def _continue(self) -> None:
         sid = self._selected_id()
@@ -994,8 +1093,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.monitor = monitor
         self.session_id = session_id
-        self.provider = default_provider()
-        self.model = PROVIDERS[self.provider]["default_model"]
+        saved_p = monitor.store.get_meta("provider")
+        saved_m = monitor.store.get_meta("model")
+        self.provider = saved_p if saved_p in PROVIDERS else default_provider()
+        self.model = saved_m or PROVIDERS[self.provider]["default_model"]
         self._thread: Optional[ChatThread] = None
         self._stream_label: Optional[QLabel] = None
         self._stream_text = ""
@@ -1124,9 +1225,14 @@ class MainWindow(QMainWindow):
         self.chip.setObjectName("chipOk")
         self.metric = QLabel("drift 0.000")
         self.metric.setObjectName("muted")
+        reset_btn = QPushButton("⤢ Reset")
+        reset_btn.setObjectName("link")
+        reset_btn.setToolTip("Reset zoom · scroll to zoom, drag to pan, hover for details")
+        reset_btn.clicked.connect(lambda: self.chart.reset_view())
         top.addWidget(self.chip)
         top.addStretch(1)
         top.addWidget(self.metric)
+        top.addWidget(reset_btn)
         lay.addLayout(top)
 
         chart_card = QFrame()
@@ -1311,6 +1417,8 @@ class MainWindow(QMainWindow):
             provider, model, _ = dlg.result_values()
             self.provider = provider
             self.model = model or PROVIDERS[provider]["default_model"]
+            self.monitor.store.set_meta("provider", self.provider)
+            self.monitor.store.set_meta("model", self.model)
             self._sync_provider_label()
             self._update_coach()
 
