@@ -567,6 +567,26 @@ class ModelDownloadThread(QThread):
             self.failed.emit(str(exc))
 
 
+class SmartThread(QThread):
+    """Run LLM-based smart drift analysis off the UI thread."""
+
+    done = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, anchor, turns, provider, model) -> None:
+        super().__init__()
+        self._args = (anchor, turns, provider, model)
+
+    def run(self) -> None:
+        try:
+            from cdm.smart import analyze
+
+            anchor, turns, provider, model = self._args
+            self.done.emit(analyze(anchor, turns, provider, model))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 # --------------------------------------------------------------------------- #
 # Reusable provider/model/key setup widget
 # --------------------------------------------------------------------------- #
@@ -860,6 +880,15 @@ class SettingsDialog(QDialog):
             erow.addStretch(1)
             lay.addLayout(erow)
             self._sync_engine_label()
+
+            self.smart_check = QCheckBox("Smart analysis — let the LLM judge drift (recommended)")
+            self.smart_check.setChecked((store.get_meta("smart") or "on") != "off")
+            self.smart_check.setToolTip(
+                "Uses your connected LLM to understand sub-goals and evolving goals, so "
+                "deep work on part of a big goal isn't flagged as drift. Falls back to the "
+                "offline engine when no LLM is connected."
+            )
+            lay.addWidget(self.smart_check)
 
         row = QHBoxLayout()
         cancel = QPushButton("Cancel")
@@ -1221,6 +1250,11 @@ class MainWindow(QMainWindow):
         self._stream_text = ""
         self._bubbles: List[QWidget] = []
         self.go_back = False  # set when the user returns to the session menu
+        # Smart (LLM) analysis: on by default when a provider is connected.
+        self.smart_enabled = (monitor.store.get_meta("smart") or "on") != "off"
+        self.smart_verdict: Optional[dict] = None
+        self._smart_thread: Optional[SmartThread] = None
+        self._last_smart_n = -99
         # Tail mode: monitor a live Claude Code terminal transcript (read-only).
         self.tail = cc.ClaudeCodeTail(tail_path, start_at_end=True) if tail_path else None
 
@@ -1420,6 +1454,10 @@ class MainWindow(QMainWindow):
         explain.setWordWrap(True)
         lay.addWidget(explain)
 
+        self.smart_label = QLabel("")
+        self.smart_label.setWordWrap(True)
+        lay.addWidget(self.smart_label)
+
         self.corr_card = QFrame()
         self.corr_card.setObjectName("card")
         ccc = QVBoxLayout(self.corr_card)
@@ -1488,6 +1526,16 @@ class MainWindow(QMainWindow):
         self.provider_label.setText(f"{dot} {PROVIDERS[self.provider]['label']} · {self.model}")
 
     def _update_coach(self) -> None:
+        if self.smart_verdict:
+            v = self.smart_verdict
+            if v["status"] == "drifting":
+                self.coach.setText("⚠️ Smart: off-track — " + v.get("reason", "") +
+                                   " Use the corrective on the right.")
+            else:
+                nice = {"on_track": "on track", "sub_task": "on track — working on a sub-task of your goal",
+                        "evolved": "your goal evolved — anchor updated"}.get(v["status"], "on track")
+                self.coach.setText(f"🧠 Smart: {nice} — {v.get('reason', '')}")
+            return
         if self.tail:
             if self._last_drift_high():
                 self.coach.setText(
@@ -1555,8 +1603,16 @@ class MainWindow(QMainWindow):
             self.model = model or PROVIDERS[provider]["default_model"]
             self.monitor.store.set_meta("provider", self.provider)
             self.monitor.store.set_meta("model", self.model)
+            if hasattr(dlg, "smart_check"):
+                on = dlg.smart_check.isChecked()
+                self.monitor.store.set_meta("smart", "on" if on else "off")
+                self.smart_enabled = on
+                if not on:
+                    self.smart_verdict = None
+                    self.smart_label.setText("")
             self._sync_provider_label()
             self._update_coach()
+            self._refresh_chart()
 
     def _explain_threshold(self) -> None:
         QMessageBox.information(
@@ -1686,6 +1742,57 @@ class MainWindow(QMainWindow):
         self._start_stream(False)
 
     # -- refresh ------------------------------------------------------------- #
+    def _maybe_smart(self) -> None:
+        """Kick off LLM analysis every few turns when Smart mode is available."""
+        if not self.smart_enabled or not provider_ready(self.provider):
+            return
+        if self._smart_thread and self._smart_thread.isRunning():
+            return
+        msgs = self.monitor.store.get_messages(self.session_id)
+        if len(msgs) < 2 or (len(msgs) - self._last_smart_n) < 3:
+            return
+        self._last_smart_n = len(msgs)
+        session = self.monitor.store.get_session(self.session_id)
+        if session is None:
+            return
+        turns = [{"role": m.role, "text": m.text} for m in msgs]
+        self._smart_thread = SmartThread(session.anchor_goal, turns, self.provider, self.model)
+        self._smart_thread.done.connect(self._on_smart_done)
+        self._smart_thread.failed.connect(self._on_smart_failed)
+        self._smart_thread.start()
+
+    def _on_smart_done(self, verdict: dict) -> None:
+        self.smart_verdict = verdict
+        self._update_smart_ui()
+        self._update_coach()
+
+    def _on_smart_failed(self, _msg: str) -> None:
+        # Stay on the offline signal; permit a retry on the next cadence.
+        self._last_smart_n = -99
+
+    def _update_smart_ui(self) -> None:
+        """Smart verdict (when present) is authoritative over the offline cosine chip."""
+        v = self.smart_verdict
+        if not v:
+            self.smart_label.setText("")
+            return
+        emoji = {"on_track": "✅", "sub_task": "🧩", "evolved": "🔄", "drifting": "⚠️"}
+        self.smart_label.setText(f"🧠 Smart: {emoji.get(v['status'], '')} {v.get('reason', '')}")
+        if v["status"] == "drifting":
+            self.chip.setText("DRIFTING")
+            self.chip.setObjectName("chipBad")
+            corr = v.get("corrective") or self.monitor.current_corrective_prompt(self.session_id)
+            self.corr_text.setPlainText(corr)
+            self.corr_card.setVisible(True)
+        else:
+            nice = {"on_track": "on track", "sub_task": "on track · sub-task",
+                    "evolved": "on track · evolved"}.get(v["status"], "on track")
+            self.chip.setText(nice)
+            self.chip.setObjectName("chipOk")
+            self.corr_card.setVisible(False)
+        self.chip.style().unpolish(self.chip)
+        self.chip.style().polish(self.chip)
+
     def _tick(self) -> None:
         if self.tail:
             try:
@@ -1697,6 +1804,7 @@ class MainWindow(QMainWindow):
         self._refresh_chart()
         self._update_coach()
         self._update_buttons()
+        self._maybe_smart()
 
     def _refresh_chart(self) -> None:
         try:
@@ -1722,6 +1830,7 @@ class MainWindow(QMainWindow):
             self.corr_card.setVisible(False)
         self.chip.style().unpolish(self.chip)
         self.chip.style().polish(self.chip)
+        self._update_smart_ui()  # smart verdict overrides the offline chip when present
 
     def closeEvent(self, event) -> None:  # noqa: N802
         try:
@@ -1729,6 +1838,8 @@ class MainWindow(QMainWindow):
             if self._thread and self._thread.isRunning():
                 self._thread.stop()
                 self._thread.wait(2000)
+            if self._smart_thread and self._smart_thread.isRunning():
+                self._smart_thread.wait(50)
             if is_watcher_running():
                 stop_watcher()
         except Exception:

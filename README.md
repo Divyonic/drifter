@@ -104,6 +104,23 @@ the fast offline embedder (no latency, no network), and prints a re-anchor to st
 when you're off-track — which Claude Code adds as context for that turn. It never
 blocks your prompt.
 
+### Smart mode (LLM understands your goal)
+
+Embedding distance is blind to intent — deep work on a *sub-part* of a big goal looks
+like drift, and a goal that *legitimately evolves* gets flagged. **Smart mode** asks
+your connected LLM to read the conversation and judge it properly:
+
+- **on track** — directly advancing the goal
+- **sub-task** — narrowly focused on a legitimate part of a big goal (*not* drift)
+- **evolved** — the goal intentionally changed/expanded (the anchor updates)
+- **drifting** — genuinely off the goal (and only then is a corrective offered)
+
+It runs every few turns in the background using the LLM you've connected (your Claude
+subscription works — no key), and its verdict (with a one-line reason + sub-goals)
+overrides the raw distance signal. It's **on by default whenever a provider is
+connected**, and falls back to the offline engine when one isn't. Toggle in
+**Settings → Smart analysis**.
+
 ### Smarter graph
 
 The chart shows a learned **baseline band** (what's "normal" for *this* chat — so a
