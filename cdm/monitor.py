@@ -307,6 +307,10 @@ class DriftMonitor:
         """Return the most recent goal state for a session, or ``None``."""
         return self.store.get_latest_goal_state(session_id)
 
+    def remove_last_turn(self, session_id: str) -> Optional[int]:
+        """Drop the most recent turn + its drift score (used for 'regenerate')."""
+        return self.store.delete_last_message(session_id)
+
     # -- controls -------------------------------------------------------------
 
     def set_threshold(self, value: float) -> None:

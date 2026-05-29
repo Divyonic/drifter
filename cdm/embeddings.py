@@ -28,6 +28,7 @@ __all__ = [
     "Embedder",
     "HashingEmbedder",
     "LocalEmbedder",
+    "SemanticEmbedder",
     "get_embedder",
     "cosine_similarity",
     "cosine_distance",
@@ -269,6 +270,52 @@ class LocalEmbedder:
         return self.encode([text])[0]
 
 
+class SemanticEmbedder:
+    """Neural sentence embeddings via ``fastembed`` (onnxruntime — no torch).
+
+    Downloads the model once (cached under the data dir), then runs fully offline.
+    Gives proper *semantic* drift: "related but reworded" text scores close, while
+    off-topic text scores far — unlike the lexical hashing fallback. ``fastembed``
+    is lazily imported so the package works without it.
+    """
+
+    def __init__(self, model_name: str = config.SEMANTIC_MODEL) -> None:
+        try:
+            from fastembed import TextEmbedding  # type: ignore
+        except Exception as exc:  # pragma: no cover - exercised only when absent
+            raise ImportError(
+                "SemanticEmbedder requires the optional 'fastembed' package "
+                "(pip install fastembed)."
+            ) from exc
+        try:
+            config.SEMANTIC_CACHE.mkdir(parents=True, exist_ok=True)
+            self._model = TextEmbedding(
+                model_name=model_name, cache_dir=str(config.SEMANTIC_CACHE)
+            )
+        except Exception as exc:  # pragma: no cover - needs network/model files
+            raise RuntimeError(
+                f"Could not load fastembed model {model_name!r}: {exc}"
+            ) from exc
+        self.model_name: str = model_name
+        self.name: str = f"semantic:{model_name.split('/')[-1]}"
+        # Neural embeddings separate on- from off-topic at the default scale.
+        self.suggested_threshold: float = config.DEFAULT_THRESHOLD
+        self.dim: int = len(self.encode_one("probe"))
+
+    def encode(self, texts: List[str]) -> List[List[float]]:
+        """Encode a batch of texts into unit-normalised vectors."""
+        if not texts:
+            return []
+        out: List[List[float]] = []
+        for vec in self._model.embed(list(texts)):
+            out.append(_l2_normalise(np.asarray(vec, dtype=np.float64)).tolist())
+        return out
+
+    def encode_one(self, text: str) -> List[float]:
+        """Encode a single text into a unit-normalised vector."""
+        return self.encode([text])[0]
+
+
 def get_embedder(preference: str = config.EMBEDDER_PREFERENCE) -> Embedder:
     """Build an :class:`Embedder` according to ``preference``.
 
@@ -289,6 +336,8 @@ def get_embedder(preference: str = config.EMBEDDER_PREFERENCE) -> Embedder:
     pref = (preference or "auto").strip().lower()
     if pref == "hashing":
         return HashingEmbedder()
+    if pref in ("semantic", "fastembed"):
+        return SemanticEmbedder()
     if pref == "local":
         return LocalEmbedder()
     if pref == "auto":
@@ -298,7 +347,7 @@ def get_embedder(preference: str = config.EMBEDDER_PREFERENCE) -> Embedder:
             return HashingEmbedder()
     raise ValueError(
         f"Unknown embedder preference {preference!r}; "
-        "expected 'auto', 'local' or 'hashing'."
+        "expected 'auto', 'semantic', 'local' or 'hashing'."
     )
 
 

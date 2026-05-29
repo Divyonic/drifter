@@ -1,12 +1,12 @@
 """Drifter — native desktop app (PySide6 + pyqtgraph), Apple-inspired UI.
 
-A real desktop window (no browser): a guided setup walks you through connecting
-your AI and naming a goal, then you chat in-app while context drift is tracked live
-on a clean chart and a coach bar tells you the next step. Everything is local —
-sessions in SQLite, API keys on disk, drift engine offline; API calls go straight
-to the provider.
+A real desktop window (no browser): guided setup connects your AI and names a goal,
+then you chat in-app with streaming replies while context drift is tracked live on a
+clean chart and a coach bar tells you the next step. Light/dark follow macOS.
 
-Launch with ``drifter`` (or ``python -m cdm.desktop``).
+Local by design: sessions in SQLite, API keys on disk, drift engine offline (hashing
+fallback, or semantic via fastembed once downloaded). API calls go straight to the
+provider. Launch with ``drifter`` (or ``python -m cdm.desktop``).
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -39,6 +40,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QStackedWidget,
@@ -48,6 +50,7 @@ from PySide6.QtWidgets import (
 )
 
 from cdm import config
+from cdm.embeddings import get_embedder
 from cdm.llm import (
     PROVIDERS,
     LLMError,
@@ -63,71 +66,93 @@ from cdm.transcript import parse_transcript
 from cdm.watcher import is_watcher_running, start_watcher_process, stop_watcher
 
 # --------------------------------------------------------------------------- #
-# Palette (Apple-inspired: white, system grays, orange accent) + theme
+# Palette (Apple-inspired light + dark) and tokenised stylesheet
 # --------------------------------------------------------------------------- #
-C = {
-    "bg": "#FFFFFF",
-    "panel": "#F5F5F7",
-    "ink": "#1D1D1F",
-    "muted": "#86868B",
-    "line": "#D2D2D7",
-    "line_soft": "#E8E8ED",
-    "accent": "#FF6A00",
-    "accent_hover": "#FF8124",
-    "danger": "#FF3B30",
+LIGHT = {
+    "bg": "#FFFFFF", "panel": "#F5F5F7", "ink": "#1D1D1F", "muted": "#86868B",
+    "line": "#D2D2D7", "line_soft": "#E8E8ED", "accent": "#FF6A00", "accent_hover": "#FF8124",
+    "danger": "#FF3B30", "coach_bg": "#FFF2E8", "coach_fg": "#B8500E", "sel": "#FFE3CC",
+    "okbg": "#E7F6EC", "okfg": "#1B7F3B", "badbg": "#FFE5E2", "badfg": "#FF3B30",
+    "ubg": "#FF6A00", "ufg": "#FFFFFF", "abg": "#F5F5F7", "afg": "#1D1D1F",
+    "scroll": "#C7C7CC", "input": "#FFFFFF", "hover": "#F5F5F7",
 }
+DARK = {
+    "bg": "#1C1C1E", "panel": "#2C2C2E", "ink": "#F5F5F7", "muted": "#98989D",
+    "line": "#3A3A3C", "line_soft": "#2C2C2E", "accent": "#FF7A1A", "accent_hover": "#FF9442",
+    "danger": "#FF453A", "coach_bg": "#3A2A1C", "coach_fg": "#FFB37A", "sel": "#5A3A1F",
+    "okbg": "#1E3A28", "okfg": "#5BD27E", "badbg": "#3A1F1E", "badfg": "#FF6B61",
+    "ubg": "#FF7A1A", "ufg": "#FFFFFF", "abg": "#2C2C2E", "afg": "#F5F5F7",
+    "scroll": "#48484A", "input": "#2C2C2E", "hover": "#2C2C2E",
+}
+C = dict(LIGHT)  # current palette (mutated by set_dark)
 
-QSS = """
+
+def set_dark(dark: bool) -> None:
+    """Switch the active palette."""
+    C.clear()
+    C.update(DARK if dark else LIGHT)
+
+
+_QSS = """
 * { font-family: "-apple-system", "SF Pro Text", "SF Pro Display", "Helvetica Neue", sans-serif; }
-QWidget { background: #FFFFFF; color: #1D1D1F; font-size: 13px; }
-QMainWindow, QDialog { background: #FFFFFF; }
+QWidget { background: @bg@; color: @ink@; font-size: 13px; }
+QMainWindow, QDialog { background: @bg@; }
 QLabel#h1 { font-size: 26px; font-weight: 600; }
 QLabel#h2 { font-size: 17px; font-weight: 600; }
-QLabel#muted { color: #86868B; }
-QLabel#anchor { color: #86868B; font-size: 12px; }
-QLabel#coach { background: #FFF2E8; color: #B8500E; border-radius: 12px; padding: 11px 15px; font-weight: 600; }
-
-QFrame#card { background: #FFFFFF; border: 1px solid #E8E8ED; border-radius: 16px; }
-QFrame#hairline { background: #D2D2D7; max-height: 1px; min-height: 1px; border: none; }
-
-QPushButton { background: #FFFFFF; color: #1D1D1F; border: 1px solid #D2D2D7; border-radius: 10px; padding: 9px 16px; font-weight: 600; }
-QPushButton:hover { background: #F5F5F7; }
-QPushButton:disabled { color: #B0B0B5; border-color: #E8E8ED; }
-QPushButton#primary { background: #FF6A00; color: #FFFFFF; border: none; }
-QPushButton#primary:hover { background: #FF8124; }
-QPushButton#primary:disabled { background: #FFCBA6; }
-QPushButton#link { background: transparent; border: none; color: #FF6A00; padding: 9px 6px; font-weight: 600; }
-QPushButton#link:hover { color: #FF8124; }
-
-QLineEdit, QPlainTextEdit, QComboBox, QDoubleSpinBox {
-    background: #FFFFFF; border: 1px solid #D2D2D7; border-radius: 10px; padding: 9px 11px;
-    selection-background-color: #FFE3CC; selection-color: #1D1D1F;
-}
-QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border: 1px solid #FF6A00; }
+QLabel#muted { color: @muted@; }
+QLabel#anchor { color: @muted@; font-size: 12px; }
+QLabel#coach { background: @coach_bg@; color: @coach_fg@; border-radius: 12px; padding: 11px 15px; font-weight: 600; }
+QFrame#card { background: @bg@; border: 1px solid @line_soft@; border-radius: 16px; }
+QFrame#hairline { background: @line@; max-height: 1px; min-height: 1px; border: none; }
+QPushButton { background: @bg@; color: @ink@; border: 1px solid @line@; border-radius: 10px; padding: 9px 16px; font-weight: 600; }
+QPushButton:hover { background: @hover@; }
+QPushButton:disabled { color: @muted@; border-color: @line_soft@; }
+QPushButton#primary { background: @accent@; color: #FFFFFF; border: none; }
+QPushButton#primary:hover { background: @accent_hover@; }
+QPushButton#primary:disabled { background: @line@; }
+QPushButton#link { background: transparent; border: none; color: @accent@; padding: 9px 6px; font-weight: 600; }
+QPushButton#link:hover { color: @accent_hover@; }
+QLineEdit, QPlainTextEdit, QComboBox, QDoubleSpinBox { background: @input@; border: 1px solid @line@; border-radius: 10px; padding: 9px 11px; selection-background-color: @sel@; selection-color: @ink@; }
+QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border: 1px solid @accent@; }
 QComboBox::drop-down { border: none; width: 22px; }
-QComboBox QAbstractItemView { background: #FFFFFF; border: 1px solid #D2D2D7; border-radius: 10px;
-    selection-background-color: #FFF2E8; selection-color: #1D1D1F; outline: none; padding: 4px; }
-
-QListWidget { background: #FFFFFF; border: 1px solid #E8E8ED; border-radius: 16px; padding: 8px; }
-QListWidget::item { padding: 14px 14px; border-radius: 12px; color: #1D1D1F; }
-QListWidget::item:selected { background: #FFF2E8; color: #1D1D1F; }
-QListWidget::item:hover { background: #F5F5F7; }
-
+QComboBox QAbstractItemView { background: @bg@; border: 1px solid @line@; border-radius: 10px; selection-background-color: @coach_bg@; selection-color: @ink@; outline: none; padding: 4px; }
+QListWidget { background: @bg@; border: 1px solid @line_soft@; border-radius: 16px; padding: 8px; }
+QListWidget::item { padding: 14px 14px; border-radius: 12px; color: @ink@; }
+QListWidget::item:selected { background: @coach_bg@; color: @ink@; }
+QListWidget::item:hover { background: @hover@; }
 QScrollArea { border: none; }
 QScrollBar:vertical { background: transparent; width: 9px; margin: 2px; }
-QScrollBar::handle:vertical { background: #C7C7CC; border-radius: 4px; min-height: 30px; }
+QScrollBar::handle:vertical { background: @scroll@; border-radius: 4px; min-height: 30px; }
 QScrollBar::add-line, QScrollBar::sub-line { height: 0; }
-
-QLabel#chipOk { background: #E7F6EC; color: #1B7F3B; border-radius: 11px; padding: 6px 13px; font-weight: 700; }
-QLabel#chipBad { background: #FFE5E2; color: #FF3B30; border-radius: 11px; padding: 6px 13px; font-weight: 700; }
-QLabel#bubbleUser { background: #FF6A00; color: #FFFFFF; border-radius: 18px; padding: 11px 14px; }
-QLabel#bubbleAsst { background: #F5F5F7; color: #1D1D1F; border-radius: 18px; padding: 11px 14px; }
-QCheckBox { color: #86868B; }
+QLabel#chipOk { background: @okbg@; color: @okfg@; border-radius: 11px; padding: 6px 13px; font-weight: 700; }
+QLabel#chipBad { background: @badbg@; color: @badfg@; border-radius: 11px; padding: 6px 13px; font-weight: 700; }
+QLabel#bubbleUser { background: @ubg@; color: @ufg@; border-radius: 18px; padding: 11px 14px; }
+QLabel#bubbleAsst { background: @abg@; color: @afg@; border-radius: 18px; padding: 11px 14px; }
+QCheckBox { color: @muted@; }
 """
 
 
+def build_qss() -> str:
+    """Render the stylesheet against the active palette ``C``."""
+    s = _QSS
+    for key, value in C.items():
+        s = s.replace(f"@{key}@", value)
+    return s
+
+
+def _md_to_html(text: str) -> str:
+    """Render markdown to the HTML subset QLabel understands (with a plain fallback)."""
+    try:
+        from markdown_it import MarkdownIt
+
+        return MarkdownIt("commonmark", {"breaks": True}).render(text or "")
+    except Exception:
+        import html as _html
+
+        return "<span>" + _html.escape(text or "").replace("\n", "<br>") + "</span>"
+
+
 def _shadow(widget: QWidget, blur: int = 30, dy: int = 8, alpha: int = 26) -> QWidget:
-    """Apply a soft Apple-like drop shadow to a widget (usually a card)."""
     eff = QGraphicsDropShadowEffect(widget)
     eff.setBlurRadius(blur)
     eff.setOffset(0, dy)
@@ -143,7 +168,7 @@ def _hairline() -> QFrame:
 
 
 # --------------------------------------------------------------------------- #
-# Local profile (offline; just a display name)
+# Local profile + embedder preference (offline)
 # --------------------------------------------------------------------------- #
 def _profile_path():
     config.ensure_data_dir()
@@ -184,7 +209,6 @@ def time_greeting(name: str = "") -> str:
 
 
 def first_connected_provider() -> Optional[str]:
-    """Return the first provider that already has a key, if any."""
     return next((p for p in PROVIDERS if get_key(p)), None)
 
 
@@ -192,11 +216,19 @@ def any_key_present() -> bool:
     return first_connected_provider() is not None
 
 
+def safe_embedder(preference: str):
+    """Build the preferred embedder, falling back to hashing on any failure."""
+    try:
+        return get_embedder(preference)
+    except Exception:
+        return get_embedder("hashing")
+
+
 # --------------------------------------------------------------------------- #
-# Drift chart (clean area chart)
+# Drift chart (palette-aware area chart)
 # --------------------------------------------------------------------------- #
 class DriftChart(pg.PlotWidget):
-    """Minimal area chart: orange = drift vs anchor, grey dashed = vs reference."""
+    """Minimal area chart: accent = drift vs anchor, muted dashed = vs reference."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -205,20 +237,21 @@ class DriftChart(pg.PlotWidget):
         self.setMouseEnabled(x=False, y=False)
         self.hideButtons()
         self.setYRange(0, 1.0, padding=0.02)
-        self.showGrid(x=False, y=True, alpha=0.08)
+        self.showGrid(x=False, y=True, alpha=0.10)
         for ax in ("left", "bottom"):
             self.getAxis(ax).setTextPen(C["muted"])
             self.getAxis(ax).setPen(C["line_soft"])
         self.getAxis("left").setLabel("drift", color=C["muted"])
         self.getAxis("bottom").setLabel("turn", color=C["muted"])
 
+        accent = QColor(C["accent"])
         self._anchor = self.plot(
             [], [], pen=pg.mkPen(C["accent"], width=2.5),
-            fillLevel=0, brush=pg.mkBrush(255, 106, 0, 28),
+            fillLevel=0, brush=pg.mkBrush(accent.red(), accent.green(), accent.blue(), 28),
             symbol="o", symbolSize=5, symbolBrush=C["accent"], symbolPen=None,
         )
         self._reference = self.plot(
-            [], [], pen=pg.mkPen("#C7C7CC", width=1.6, style=Qt.DashLine)
+            [], [], pen=pg.mkPen(C["muted"], width=1.6, style=Qt.DashLine)
         )
         self._threshold = pg.InfiniteLine(
             angle=0, pen=pg.mkPen(C["danger"], width=1.2, style=Qt.DotLine)
@@ -232,32 +265,55 @@ class DriftChart(pg.PlotWidget):
 
 
 # --------------------------------------------------------------------------- #
-# Background LLM call
+# Background threads
 # --------------------------------------------------------------------------- #
 class ChatThread(QThread):
+    """Stream one LLM reply off the UI thread. Emits chunks; supports stop()."""
+
+    chunk = Signal(str)
     done = Signal(str)
     failed = Signal(str)
 
     def __init__(self, provider, model, api_key, messages, system) -> None:
         super().__init__()
-        self._provider = provider
-        self._model = model
-        self._api_key = api_key
-        self._messages = messages
-        self._system = system
+        self._args = (provider, model, api_key, messages, system)
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
 
     def run(self) -> None:
+        provider, model, api_key, messages, system = self._args
         try:
             from cdm.llm import LLMClient
 
-            client = LLMClient(self._provider, api_key=self._api_key, model=self._model)
-            self.done.emit(client.chat(self._messages, system=self._system))
+            client = LLMClient(provider, api_key=api_key, model=model)
+            full = client.chat_stream(
+                messages, system=system,
+                on_chunk=lambda t: self.chunk.emit(t),
+                should_stop=lambda: self._stop,
+            )
+            self.done.emit(full)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ModelDownloadThread(QThread):
+    """Construct the semantic embedder (downloads the model once) off the UI thread."""
+
+    done = Signal()
+    failed = Signal(str)
+
+    def run(self) -> None:
+        try:
+            get_embedder("semantic")
+            self.done.emit()
         except Exception as exc:
             self.failed.emit(str(exc))
 
 
 # --------------------------------------------------------------------------- #
-# Reusable provider/model/key setup widget (used by onboarding + settings)
+# Reusable provider/model/key setup widget
 # --------------------------------------------------------------------------- #
 class ProviderSetup(QWidget):
     """Provider picker + latest-model dropdown + key field with a 'Get key' link."""
@@ -359,11 +415,9 @@ class ProviderSetup(QWidget):
 
 
 # --------------------------------------------------------------------------- #
-# Guided onboarding (3 steps)
+# Onboarding (3 guided steps)
 # --------------------------------------------------------------------------- #
 class OnboardingWizard(QDialog):
-    """First-run setup: welcome → connect AI → goal. Produces a session id."""
-
     TITLES = ["Welcome", "Connect your AI", "Your goal"]
 
     def __init__(self, monitor: DriftMonitor, parent=None) -> None:
@@ -378,14 +432,12 @@ class OnboardingWizard(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 34, 40, 30)
         root.setSpacing(16)
-
         self.step_label = QLabel()
         self.step_label.setObjectName("muted")
         self.title = QLabel()
         self.title.setObjectName("h1")
         root.addWidget(self.step_label)
         root.addWidget(self.title)
-
         self.stack = QStackedWidget()
         root.addWidget(self.stack, 1)
         self.stack.addWidget(self._step_welcome())
@@ -402,7 +454,6 @@ class OnboardingWizard(QDialog):
         nav.addStretch(1)
         nav.addWidget(self.next_btn)
         root.addLayout(nav)
-
         self._go(0)
 
     def _step_welcome(self) -> QWidget:
@@ -429,9 +480,8 @@ class OnboardingWizard(QDialog):
         lay = QVBoxLayout(w)
         lay.setSpacing(12)
         msg = QLabel(
-            "Connect the AI you use. Don’t have a key yet? Click ‘Get an API key’, sign "
-            "in, create one, and paste it below. Calls go straight to the provider — "
-            "there’s no server of ours."
+            "Connect the AI you use. No key yet? Click ‘Get an API key’, sign in, create "
+            "one, and paste it below. Calls go straight to the provider — no server of ours."
         )
         msg.setObjectName("muted")
         msg.setWordWrap(True)
@@ -498,23 +548,45 @@ class OnboardingWizard(QDialog):
 
 
 # --------------------------------------------------------------------------- #
-# Settings + new-session + launch dialogs
+# Settings (provider/model/key + drift-engine toggle)
 # --------------------------------------------------------------------------- #
 class SettingsDialog(QDialog):
-    """Change the active provider, model and (locally stored) API key."""
-
-    def __init__(self, provider: str, model: str, parent=None) -> None:
+    def __init__(self, provider: str, model: str, store=None, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Connect your AI")
-        self.setMinimumWidth(480)
+        self.store = store
+        self._dl: Optional[ModelDownloadThread] = None
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(500)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(28, 24, 28, 22)
         lay.setSpacing(16)
+
         title = QLabel("Connect your AI")
         title.setObjectName("h2")
         lay.addWidget(title)
         self.setup = ProviderSetup(provider, model)
         lay.addWidget(self.setup)
+
+        if store is not None:
+            lay.addWidget(_hairline())
+            eng = QLabel("Drift engine")
+            eng.setObjectName("h2")
+            lay.addWidget(eng)
+            self.engine_state = QLabel()
+            self.engine_state.setObjectName("muted")
+            self.engine_state.setWordWrap(True)
+            lay.addWidget(self.engine_state)
+            erow = QHBoxLayout()
+            fast_btn = QPushButton("Use fast (offline)")
+            sem_btn = QPushButton("Enable semantic (download once)")
+            fast_btn.clicked.connect(self._use_fast)
+            sem_btn.clicked.connect(self._enable_semantic)
+            erow.addWidget(fast_btn)
+            erow.addWidget(sem_btn)
+            erow.addStretch(1)
+            lay.addLayout(erow)
+            self._sync_engine_label()
+
         row = QHBoxLayout()
         cancel = QPushButton("Cancel")
         save = QPushButton("Save")
@@ -526,13 +598,53 @@ class SettingsDialog(QDialog):
         row.addWidget(save)
         lay.addLayout(row)
 
+    def _engine_pref(self) -> str:
+        return (self.store.get_meta("embedder") if self.store else None) or config.EMBEDDER_PREFERENCE
+
+    def _sync_engine_label(self) -> None:
+        pref = self._engine_pref()
+        if pref in ("semantic", "fastembed"):
+            self.engine_state.setText("Current: Semantic (neural, offline after download). Most accurate.")
+        else:
+            self.engine_state.setText(
+                "Current: Fast (pure-Python, offline, zero download). Semantic is more "
+                "accurate for reworded text. Changes apply on restart."
+            )
+
+    def _use_fast(self) -> None:
+        if self.store:
+            self.store.set_meta("embedder", "hashing")
+        self._sync_engine_label()
+        QMessageBox.information(self, "Drifter", "Set to Fast. Restart Drifter to apply.")
+
+    def _enable_semantic(self) -> None:
+        if self._dl and self._dl.isRunning():
+            return
+        prog = QProgressDialog("Downloading the semantic model (one time)…", None, 0, 0, self)
+        prog.setWindowTitle("Drifter")
+        prog.setWindowModality(Qt.WindowModal)
+        prog.setCancelButton(None)
+        prog.show()
+        self._dl = ModelDownloadThread()
+        self._dl.done.connect(lambda: self._semantic_done(prog, None))
+        self._dl.failed.connect(lambda msg: self._semantic_done(prog, msg))
+        self._dl.start()
+
+    def _semantic_done(self, prog, error: Optional[str]) -> None:
+        prog.close()
+        if error:
+            QMessageBox.warning(self, "Drifter", f"Could not enable semantic: {error}")
+            return
+        if self.store:
+            self.store.set_meta("embedder", "semantic")
+        self._sync_engine_label()
+        QMessageBox.information(self, "Drifter", "Semantic drift enabled. Restart Drifter to apply.")
+
     def result_values(self):
         return self.setup.persist()
 
 
 class NewSessionDialog(QDialog):
-    """Collect project, goal and constraints for a new session."""
-
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("New session")
@@ -570,19 +682,16 @@ class NewSessionDialog(QDialog):
 
 
 class LaunchDialog(QDialog):
-    """Returning-user startup: greet, list past sessions, continue/new/import."""
-
     def __init__(self, monitor: DriftMonitor, parent=None) -> None:
         super().__init__(parent)
         self.monitor = monitor
         self.chosen_session_id: Optional[str] = None
         self.setWindowTitle("Drifter")
-        self.setMinimumSize(580, 580)
+        self.setMinimumSize(580, 600)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(36, 32, 36, 28)
         root.setSpacing(14)
-
         name = load_profile_name()
         hello = QLabel(time_greeting(name))
         hello.setObjectName("h1")
@@ -596,10 +705,20 @@ class LaunchDialog(QDialog):
         self.list.itemDoubleClicked.connect(lambda _i: self._continue())
         root.addWidget(self.list, 1)
 
+        manage = QHBoxLayout()
+        rename_btn = QPushButton("Rename")
+        delete_btn = QPushButton("Delete")
+        rename_btn.clicked.connect(self._rename)
+        delete_btn.clicked.connect(self._delete)
+        manage.addWidget(rename_btn)
+        manage.addWidget(delete_btn)
+        manage.addStretch(1)
+        root.addLayout(manage)
+
         btns = QHBoxLayout()
         new_btn = QPushButton("New session")
         imp_btn = QPushButton("Import chat…")
-        conn_btn = QPushButton("Connect AI")
+        conn_btn = QPushButton("Settings")
         cont_btn = QPushButton("Continue")
         cont_btn.setObjectName("primary")
         new_btn.clicked.connect(self._new)
@@ -628,6 +747,10 @@ class LaunchDialog(QDialog):
         if self.list.count():
             self.list.setCurrentRow(0)
 
+    def _selected_id(self) -> Optional[str]:
+        item = self.list.currentItem()
+        return item.data(Qt.UserRole) if item else None
+
     def _new(self) -> None:
         dlg = NewSessionDialog(self)
         if dlg.exec() == QDialog.Accepted:
@@ -655,16 +778,38 @@ class LaunchDialog(QDialog):
         self.chosen_session_id = session.session_id
         self.accept()
 
+    def _rename(self) -> None:
+        sid = self._selected_id()
+        if not sid:
+            return
+        session = self.monitor.store.get_session(sid)
+        if session is None:
+            return
+        name, ok = QInputDialog.getText(self, "Rename session", "Project name:", text=session.project_name)
+        if ok and name.strip():
+            session.project_name = name.strip()
+            self.monitor.store.update_session(session)
+            self._populate()
+
+    def _delete(self) -> None:
+        sid = self._selected_id()
+        if not sid:
+            return
+        if QMessageBox.question(self, "Delete session", "Delete this session permanently?") \
+                == QMessageBox.StandardButton.Yes:
+            self.monitor.store.delete_session(sid)
+            self._populate()
+
     def _connect(self) -> None:
         provider = first_connected_provider() or "claude"
-        SettingsDialog(provider, PROVIDERS[provider]["default_model"], self).exec()
+        SettingsDialog(provider, PROVIDERS[provider]["default_model"], self.monitor.store, self).exec()
 
     def _continue(self) -> None:
-        item = self.list.currentItem()
-        if item is None:
+        sid = self._selected_id()
+        if not sid:
             QMessageBox.information(self, "Drifter", "Pick a session, or create/import one.")
             return
-        self.chosen_session_id = item.data(Qt.UserRole)
+        self.chosen_session_id = sid
         self.accept()
 
 
@@ -672,8 +817,6 @@ class LaunchDialog(QDialog):
 # Main window
 # --------------------------------------------------------------------------- #
 class MainWindow(QMainWindow):
-    """Chat + live drift + corrective prompt + coach bar for one session."""
-
     def __init__(self, monitor: DriftMonitor, session_id: str) -> None:
         super().__init__()
         self.monitor = monitor
@@ -681,14 +824,17 @@ class MainWindow(QMainWindow):
         self.provider = first_connected_provider() or "claude"
         self.model = PROVIDERS[self.provider]["default_model"]
         self._thread: Optional[ChatThread] = None
+        self._stream_label: Optional[QLabel] = None
+        self._stream_text = ""
+        self._bubbles: List[QWidget] = []
 
         session = monitor.store.get_session(session_id)
         self.setWindowTitle(f"Drifter — {session.project_name if session else ''}")
-        self.resize(1180, 760)
-
+        self.resize(1180, 768)
         self._build_ui(session)
         self._refresh_chart()
         self._update_coach()
+        self._update_buttons()
 
         self._timer = QTimer(self)
         self._timer.setInterval(1500)
@@ -725,15 +871,13 @@ class MainWindow(QMainWindow):
         self.coach.setObjectName("coach")
         self.coach.setWordWrap(True)
         outer.addWidget(self.coach)
-
         outer.addWidget(_hairline())
 
         split = QSplitter(Qt.Horizontal)
         split.addWidget(self._build_chat_panel())
         split.addWidget(self._build_drift_panel())
-        split.setSizes([580, 560])
+        split.setSizes([590, 560])
         outer.addWidget(split, 1)
-
         self._sync_provider_label()
 
     def _build_chat_panel(self) -> QWidget:
@@ -753,22 +897,30 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.chat_scroll, 1)
 
         for m in self.monitor.store.get_messages(self.session_id):
-            self._add_bubble(m.role, m.text)
+            self._add_bubble(m.role, m.text, rich=(m.role or "").lower() != "user")
 
         self.status = QLabel("")
         self.status.setObjectName("muted")
         lay.addWidget(self.status)
 
-        row = QHBoxLayout()
         self.input = QPlainTextEdit()
         self.input.setFixedHeight(76)
         self.input.setPlaceholderText("Message your AI…   (⌘/Ctrl + Enter to send)")
+        lay.addWidget(self.input)
+
+        brow = QHBoxLayout()
+        self.regen_btn = QPushButton("Regenerate")
+        self.regen_btn.clicked.connect(self._on_regenerate)
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.clicked.connect(self._on_stop)
         self.send_btn = QPushButton("Send")
         self.send_btn.setObjectName("primary")
         self.send_btn.clicked.connect(self._on_send)
-        row.addWidget(self.input, 1)
-        row.addWidget(self.send_btn)
-        lay.addLayout(row)
+        brow.addWidget(self.regen_btn)
+        brow.addStretch(1)
+        brow.addWidget(self.stop_btn)
+        brow.addWidget(self.send_btn)
+        lay.addLayout(brow)
 
         QShortcut(QKeySequence("Ctrl+Return"), self.input, activated=self._on_send)
         QShortcut(QKeySequence("Meta+Return"), self.input, activated=self._on_send)
@@ -847,14 +999,21 @@ class MainWindow(QMainWindow):
         return panel
 
     # -- chat bubbles -------------------------------------------------------- #
-    def _add_bubble(self, role: str, text: str) -> None:
-        bubble = QLabel(text)
-        bubble.setObjectName("bubbleUser" if (role or "").lower() == "user" else "bubbleAsst")
+    def _add_bubble(self, role: str, text: str, rich: bool = False) -> QLabel:
+        is_user = (role or "").lower() == "user"
+        bubble = QLabel()
+        bubble.setObjectName("bubbleUser" if is_user else "bubbleAsst")
         bubble.setWordWrap(True)
         bubble.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        bubble.setMaximumWidth(460)
+        bubble.setMaximumWidth(470)
+        if rich:
+            bubble.setTextFormat(Qt.RichText)
+            bubble.setText(_md_to_html(text))
+        else:
+            bubble.setTextFormat(Qt.PlainText)
+            bubble.setText(text)
         wrap = QHBoxLayout()
-        if (role or "").lower() == "user":
+        if is_user:
             wrap.addStretch(1)
             wrap.addWidget(bubble)
         else:
@@ -863,25 +1022,34 @@ class MainWindow(QMainWindow):
         container = QWidget()
         container.setLayout(wrap)
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, container)
+        self._bubbles.append(container)
         QTimer.singleShot(30, lambda: self.chat_scroll.verticalScrollBar().setValue(
             self.chat_scroll.verticalScrollBar().maximum()))
+        return bubble
 
-    # -- coach + provider label --------------------------------------------- #
+    def _pop_last_bubble(self) -> None:
+        if not self._bubbles:
+            return
+        container = self._bubbles.pop()
+        self.chat_layout.removeWidget(container)
+        container.deleteLater()
+
+    # -- coach + labels ------------------------------------------------------ #
     def _sync_provider_label(self) -> None:
         dot = "●" if get_key(self.provider) else "○"
         self.provider_label.setText(f"{dot} {PROVIDERS[self.provider]['label']} · {self.model}")
 
     def _update_coach(self) -> None:
-        n_messages = len(self.monitor.store.get_messages(self.session_id))
+        n = len(self.monitor.store.get_messages(self.session_id))
         if not get_key(self.provider):
             self.coach.setText(
-                f"① Connect your AI to start chatting — open Settings (top right), pick "
+                f"① Connect your AI to start — open Settings (top right), pick "
                 f"{PROVIDERS[self.provider]['label']}, and paste an API key."
             )
-        elif n_messages == 0:
+        elif n == 0:
             self.coach.setText("② You’re connected. Type your first message below and press Send.")
         elif self._last_drift_high():
-            self.coach.setText("③ Drift detected — review the corrective prompt on the right and ‘Send to re-align’.")
+            self.coach.setText("③ Drift detected — review the corrective prompt and ‘Send to re-align’.")
         else:
             self.coach.setText("Monitoring — keep chatting. The chart updates live as drift changes.")
 
@@ -890,9 +1058,24 @@ class MainWindow(QMainWindow):
         anchor = ts.get("drift_from_anchor") or []
         return bool(anchor) and anchor[-1] > float(ts.get("threshold", self.monitor.threshold))
 
+    def _busy(self, busy: bool) -> None:
+        self.send_btn.setEnabled(not busy)
+        self.input.setReadOnly(busy)
+        self.stop_btn.setEnabled(busy)
+        self.status.setText("Streaming…" if busy else "")
+        if not busy:
+            self._update_buttons()
+
+    def _update_buttons(self) -> None:
+        msgs = self.monitor.store.get_messages(self.session_id)
+        can_regen = bool(msgs) and (msgs[-1].role or "").lower() == "assistant"
+        running = bool(self._thread and self._thread.isRunning())
+        self.regen_btn.setEnabled(can_regen and not running)
+        self.stop_btn.setEnabled(running)
+
     # -- actions ------------------------------------------------------------- #
     def _open_settings(self) -> None:
-        dlg = SettingsDialog(self.provider, self.model, self)
+        dlg = SettingsDialog(self.provider, self.model, self.monitor.store, self)
         if dlg.exec() == QDialog.Accepted:
             provider, model, _ = dlg.result_values()
             self.provider = provider
@@ -920,15 +1103,25 @@ class MainWindow(QMainWindow):
             base += "\n\n" + self.monitor.current_corrective_prompt(self.session_id)
         return base.strip()
 
-    def _busy(self, busy: bool) -> None:
-        self.send_btn.setEnabled(not busy)
-        self.status.setText("Thinking…" if busy else "")
-
     def _history(self) -> List[dict]:
         return [
             {"role": m.role, "content": m.text}
             for m in self.monitor.store.get_messages(self.session_id)
         ]
+
+    def _start_stream(self, realign: bool) -> None:
+        """Open a live assistant bubble and stream a reply into it."""
+        self._stream_text = ""
+        self._stream_label = self._add_bubble("assistant", "▍", rich=False)
+        self._busy(True)
+        self._thread = ChatThread(
+            self.provider, self.model, get_key(self.provider), self._history(),
+            self._system_prompt(realign),
+        )
+        self._thread.chunk.connect(self._on_chunk)
+        self._thread.done.connect(self._on_stream_done)
+        self._thread.failed.connect(self._on_reply_error)
+        self._thread.start()
 
     def _on_send(self) -> None:
         text = self.input.toPlainText().strip()
@@ -942,55 +1135,72 @@ class MainWindow(QMainWindow):
         res = self.monitor.add_turn(self.session_id, "user", text)
         self._add_bubble("user", text)
         self._refresh_chart()
-        realign = bool(self.auto_check.isChecked() and res.get("alert"))
-        self._busy(True)
-        self._thread = ChatThread(
-            self.provider, self.model, get_key(self.provider), self._history(), self._system_prompt(realign)
-        )
-        self._thread.done.connect(self._on_reply)
-        self._thread.failed.connect(self._on_reply_error)
-        self._thread.start()
+        self._start_stream(bool(self.auto_check.isChecked() and res.get("alert")))
 
-    def _on_reply(self, reply: str) -> None:
-        self._busy(False)
-        if not reply:
-            self.status.setText("(empty reply)")
+    def _on_chunk(self, delta: str) -> None:
+        if self._stream_label is None:
             return
-        self.monitor.add_turn(self.session_id, "assistant", reply)
-        self._add_bubble("assistant", reply)
+        self._stream_text += delta
+        self._stream_label.setText(self._stream_text + "▍")
+        self.chat_scroll.verticalScrollBar().setValue(self.chat_scroll.verticalScrollBar().maximum())
+
+    def _on_stream_done(self, full: str) -> None:
+        full = full or self._stream_text
+        if self._stream_label is not None:
+            self._stream_label.setTextFormat(Qt.RichText)
+            self._stream_label.setText(_md_to_html(full) if full else "<i>(no response)</i>")
+        self._stream_label = None
+        self._busy(False)
+        if full:
+            self.monitor.add_turn(self.session_id, "assistant", full)
         self._refresh_chart()
         self._update_coach()
+        self._update_buttons()
 
     def _on_reply_error(self, message: str) -> None:
+        if self._stream_label is not None:
+            self._pop_last_bubble()
+            self._stream_label = None
         self._busy(False)
         QMessageBox.warning(self, "LLM error", message)
+
+    def _on_stop(self) -> None:
+        if self._thread and self._thread.isRunning():
+            self._thread.stop()
+            self.status.setText("Stopping…")
+
+    def _on_regenerate(self) -> None:
+        if self._thread and self._thread.isRunning():
+            return
+        msgs = self.monitor.store.get_messages(self.session_id)
+        if not msgs or (msgs[-1].role or "").lower() != "assistant":
+            return
+        self.monitor.remove_last_turn(self.session_id)
+        self._pop_last_bubble()
+        self._refresh_chart()
+        self._start_stream(False)
 
     def _copy_corrective(self) -> None:
         QApplication.clipboard().setText(self.corr_text.toPlainText())
         self.status.setText("Corrective prompt copied.")
 
     def _send_corrective(self) -> None:
-        if (self._thread and self._thread.isRunning()) or not get_key(self.provider):
-            if not get_key(self.provider):
-                self._open_settings()
+        if (self._thread and self._thread.isRunning()):
+            return
+        if not get_key(self.provider):
+            self._open_settings()
             return
         prompt = self.monitor.current_corrective_prompt(self.session_id)
-        history = self._history() + [{"role": "user", "content": prompt}]
         self.monitor.add_turn(self.session_id, "user", prompt)
         self._add_bubble("user", "↻ Re-align: corrective prompt sent")
         self._refresh_chart()
-        self._busy(True)
-        self._thread = ChatThread(
-            self.provider, self.model, get_key(self.provider), history, self._system_prompt(False)
-        )
-        self._thread.done.connect(self._on_reply)
-        self._thread.failed.connect(self._on_reply_error)
-        self._thread.start()
+        self._start_stream(False)
 
     # -- refresh ------------------------------------------------------------- #
     def _tick(self) -> None:
         self._refresh_chart()
         self._update_coach()
+        self._update_buttons()
 
     def _refresh_chart(self) -> None:
         try:
@@ -1002,7 +1212,6 @@ class MainWindow(QMainWindow):
         reference = ts.get("drift_from_reference") or []
         threshold = float(ts.get("threshold", self.monitor.threshold))
         self.chart.update_series(turns, anchor, reference, threshold)
-
         last = anchor[-1] if anchor else 0.0
         high = bool(turns) and (last > threshold)
         self.metric.setText(f"drift {last:.3f} · {len(turns)} turns")
@@ -1020,6 +1229,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         try:
+            if self._thread and self._thread.isRunning():
+                self._thread.stop()
+                self._thread.wait(2000)
             if is_watcher_running():
                 stop_watcher()
         except Exception:
@@ -1035,14 +1247,28 @@ def main() -> int:
     pg.setConfigOptions(antialias=True)
     app = QApplication.instance() or QApplication([])
     app.setApplicationName("Drifter")
-    app.setStyleSheet(QSS)
+
+    try:
+        set_dark(app.styleHints().colorScheme() == Qt.ColorScheme.Dark)
+    except Exception:
+        set_dark(False)
+    app.setStyleSheet(build_qss())
+    try:
+        app.styleHints().colorSchemeChanged.connect(
+            lambda _s: (set_dark(app.styleHints().colorScheme() == Qt.ColorScheme.Dark),
+                        app.setStyleSheet(build_qss()))
+        )
+    except Exception:
+        pass
     app.setFont(QFont("-apple-system", 13))
 
-    monitor = DriftMonitor()
-    has_sessions = bool(monitor.store.list_sessions())
+    from cdm.storage import Store
 
-    # First run (no key, no sessions) -> guided onboarding; else session picker.
-    if not any_key_present() and not has_sessions:
+    store = Store()
+    pref = store.get_meta("embedder") or config.EMBEDDER_PREFERENCE
+    monitor = DriftMonitor(store=store, embedder=safe_embedder(pref))
+
+    if not any_key_present() and not store.list_sessions():
         dlg: QDialog = OnboardingWizard(monitor)
     else:
         dlg = LaunchDialog(monitor)

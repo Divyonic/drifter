@@ -19,19 +19,25 @@ to the provider** — there is no server in between.
 ## Install
 
 ```bash
-pip install "git+https://github.com/Divyonic/drifter.git#egg=drifter[llm]"
+pip install "git+https://github.com/Divyonic/drifter.git#egg=drifter[llm,semantic]"
 drifter
 ```
 
-`drifter` opens the desktop app. The `[llm]` extra pulls the chat SDKs (Claude, Gemini,
-OpenAI); drop it if you only want offline monitoring.
+`drifter` opens the native desktop app and walks you through a 3-step setup
+(welcome → connect your AI with a "Get an API key ↗" link → your goal). Replies
+stream in, drift tracks live, and the UI follows macOS light/dark.
+
+- `[llm]` — chat SDKs (Claude / Gemini / OpenAI).
+- `[semantic]` — `fastembed` for **neural** drift (onnxruntime, **no torch**;
+  downloads a small model once, then offline). Also enableable later via
+  **Settings → Drift engine**. Omit it to stay on the zero-download lexical default.
 
 ### From a checkout
 
 ```bash
 git clone https://github.com/Divyonic/drifter.git && cd drifter
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[llm]"
+pip install -e ".[llm,semantic]"
 drifter
 ```
 
@@ -83,8 +89,11 @@ your message ─▶ embed ─▶ drift score ─┬─▶ live chart (vs anchor 
   like `< 5 kg`, `10 L`, `$200`); decisions from choice phrases (*chose, decided, go
   with, lock in…*); `current_focus` from recent keywords. Your goal is kept verbatim.
 - **Embeddings.** Default is a pure-Python, offline **hashing** embedder (lexical
-  drift). For semantic drift install the optional neural backend:
-  `pip install sentence-transformers` (auto-detected; needs wheels for your Python).
+  drift — zero download). For **semantic** drift install `[semantic]` (fastembed,
+  onnxruntime, no torch) and enable it in **Settings → Drift engine**: it runs
+  all-MiniLM-L6-v2, downloads once, then offline. On the hard "related-but-reworded"
+  case it scores ~0.39 (vs ~0.95 off-topic) where the lexical embedder can't tell them
+  apart — far cleaner separation. Threshold auto-adjusts per backend.
 - **Smoothing.** The chart shows a short trailing moving average — the *trend* is the
   signal; raw per-turn scores still drive the immediate flag.
 
@@ -102,7 +111,8 @@ Environment variables (defaults shown):
 | `CDM_UPDATE_EVERY` | `5` | Re-derive the goal state every N turns |
 | `CDM_WINDOW` | `10` | Recent-turn window for goal extraction |
 | `CDM_SMOOTHING` | `3` | Trailing moving-average window for the chart |
-| `CDM_EMBEDDER` | `auto` | `auto` / `local` / `hashing` |
+| `CDM_EMBEDDER` | `auto` | `auto` / `semantic` / `local` / `hashing` |
+| `CDM_SEMANTIC_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | fastembed model for semantic drift |
 
 API keys live in `~/.context-drift-monitor/credentials.json` (chmod 600), or set
 `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY`.

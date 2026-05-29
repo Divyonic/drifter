@@ -34,12 +34,18 @@ ROLLING_WINDOW = int(os.environ.get("CDM_WINDOW", "10"))
 SMOOTHING_WINDOW = int(os.environ.get("CDM_SMOOTHING", "3"))
 
 # --- embeddings --------------------------------------------------------------
-# "auto"   -> use sentence-transformers if importable & model available, else hashing.
-# "local"  -> force sentence-transformers (errors if unavailable).
-# "hashing"-> force the pure-Python fallback embedder.
+# "auto"     -> sentence-transformers if importable, else the hashing fallback.
+# "semantic" -> neural embeddings via fastembed/onnxruntime (no torch; downloads
+#               the model once, then offline). "fastembed" is an alias.
+# "local"    -> force sentence-transformers (errors if unavailable).
+# "hashing"  -> force the pure-Python fallback embedder.
 EMBEDDER_PREFERENCE = os.environ.get("CDM_EMBEDDER", "auto")
 # Sentence-transformers model used when the local embedder is active.
 LOCAL_MODEL_NAME = os.environ.get("CDM_LOCAL_MODEL", "all-MiniLM-L6-v2")
+# fastembed model used by the semantic embedder (onnxruntime, no torch).
+SEMANTIC_MODEL = os.environ.get("CDM_SEMANTIC_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+# Where fastembed caches downloaded models (kept under the data dir, offline after).
+SEMANTIC_CACHE = Path(os.environ.get("CDM_SEMANTIC_CACHE", str(DATA_DIR / "models")))
 # Dimensionality of the pure-Python hashing embedder.
 HASHING_DIM = int(os.environ.get("CDM_HASHING_DIM", "512"))
 

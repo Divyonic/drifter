@@ -264,6 +264,30 @@ class Store:
             return 0
         return int(row["m"]) + 1
 
+    def delete_last_message(self, session_id: str) -> Optional[int]:
+        """Delete the highest-``turn_id`` message (and its drift score).
+
+        Returns the deleted ``turn_id``, or ``None`` if the session has no
+        messages. Used to support 'regenerate'.
+        """
+        row = self._conn.execute(
+            "SELECT MAX(turn_id) AS m FROM messages WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None or row["m"] is None:
+            return None
+        turn_id = int(row["m"])
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM messages WHERE session_id = ? AND turn_id = ?",
+                (session_id, turn_id),
+            )
+            self._conn.execute(
+                "DELETE FROM drift_scores WHERE session_id = ? AND turn_id = ?",
+                (session_id, turn_id),
+            )
+        return turn_id
+
     @staticmethod
     def _row_to_message(row: sqlite3.Row) -> Message:
         """Build a :class:`Message` from a sqlite row."""

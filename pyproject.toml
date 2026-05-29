@@ -22,14 +22,17 @@ dependencies = [
     "pyqtgraph>=0.13",
     "numpy>=1.26",
     "pyperclip>=1.8",
+    "markdown-it-py>=3.0",
 ]
 
 [project.optional-dependencies]
 # In-app chat providers (install the one(s) you use).
 llm = ["anthropic>=0.40", "google-genai>=0.3", "openai>=1.40"]
+# Semantic drift (neural embeddings via onnxruntime — no torch; downloads once).
+semantic = ["fastembed>=0.3"]
 # The optional Streamlit browser app (`drifter web`).
 web = ["streamlit>=1.37"]
-# Sharper, semantic embeddings (needs wheels for your Python version).
+# Alternative semantic backend (needs torch wheels for your Python version).
 local = ["sentence-transformers>=2.2"]
 dev = ["pytest>=7"]
 

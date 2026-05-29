@@ -271,6 +271,25 @@ class LLMClient:
             return self._chat_gemini(messages, system)
         return self._chat_openai(messages, system)
 
+    def chat_stream(
+        self,
+        messages: List[dict],
+        system: Optional[str] = None,
+        on_chunk=None,
+        should_stop=None,
+    ) -> str:
+        """Stream the reply, calling ``on_chunk(text)`` per delta; return full text.
+
+        ``should_stop()`` is polled between chunks so the caller can cancel.
+        """
+        on_chunk = on_chunk or (lambda _s: None)
+        should_stop = should_stop or (lambda: False)
+        if self.provider == "claude":
+            return self._stream_claude(messages, system, on_chunk, should_stop)
+        if self.provider == "gemini":
+            return self._stream_gemini(messages, system, on_chunk, should_stop)
+        return self._stream_openai(messages, system, on_chunk, should_stop)
+
     # -- per-provider implementations (lazy SDK imports) --------------------- #
     def _require(self, import_name: str):
         """Import a provider SDK or raise a helpful LLMError."""
@@ -337,3 +356,79 @@ class LLMClient:
             raise
         except Exception as exc:
             raise LLMError(f"OpenAI request failed: {exc}") from exc
+
+    # -- streaming variants -------------------------------------------------- #
+    def _stream_claude(self, messages, system, on_chunk, should_stop) -> str:
+        anthropic = self._require("anthropic")
+        try:
+            client = anthropic.Anthropic(api_key=self.api_key)
+            kwargs = dict(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                messages=to_anthropic_messages(messages),
+            )
+            if system:
+                kwargs["system"] = system
+            parts: List[str] = []
+            with client.messages.stream(**kwargs) as stream:
+                for text in stream.text_stream:
+                    if should_stop():
+                        break
+                    parts.append(text)
+                    on_chunk(text)
+            return "".join(parts).strip()
+        except LLMError:
+            raise
+        except Exception as exc:
+            raise LLMError(f"Claude request failed: {exc}") from exc
+
+    def _stream_openai(self, messages, system, on_chunk, should_stop) -> str:
+        openai_pkg = self._require("openai")
+        try:
+            client = openai_pkg.OpenAI(api_key=self.api_key)
+            stream = client.chat.completions.create(
+                model=self.model,
+                messages=to_openai_messages(messages, system),
+                max_tokens=self.max_tokens,
+                stream=True,
+            )
+            parts: List[str] = []
+            for chunk in stream:
+                if should_stop():
+                    break
+                try:
+                    delta = chunk.choices[0].delta.content
+                except Exception:
+                    delta = None
+                if delta:
+                    parts.append(delta)
+                    on_chunk(delta)
+            return "".join(parts).strip()
+        except LLMError:
+            raise
+        except Exception as exc:
+            raise LLMError(f"OpenAI request failed: {exc}") from exc
+
+    def _stream_gemini(self, messages, system, on_chunk, should_stop) -> str:
+        self._require("google.genai")
+        try:
+            from google import genai  # type: ignore
+            from google.genai import types  # type: ignore
+
+            client = genai.Client(api_key=self.api_key)
+            cfg = types.GenerateContentConfig(system_instruction=system) if system else None
+            parts: List[str] = []
+            for chunk in client.models.generate_content_stream(
+                model=self.model, contents=to_gemini_contents(messages), config=cfg
+            ):
+                if should_stop():
+                    break
+                text = getattr(chunk, "text", "") or ""
+                if text:
+                    parts.append(text)
+                    on_chunk(text)
+            return "".join(parts).strip()
+        except LLMError:
+            raise
+        except Exception as exc:
+            raise LLMError(f"Gemini request failed: {exc}") from exc
