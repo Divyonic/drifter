@@ -31,6 +31,26 @@ def test_provider_registry_shape():
         assert {"label", "default_model", "sdk", "pip"} <= set(meta)
 
 
+def test_providers_have_models_and_key_help():
+    from cdm.llm import curated_models, key_url
+
+    for p in PROVIDERS:
+        assert curated_models(p), f"{p} has no curated models"
+        assert key_url(p).startswith("https://")
+        assert PROVIDERS[p].get("key_hint")
+        # default model is one of the curated ids
+        assert PROVIDERS[p]["default_model"] in curated_models(p)
+
+
+def test_list_models_without_key_raises(tmp_data_dir, monkeypatch):
+    for env in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(env, raising=False)
+    from cdm.llm import list_models
+
+    with pytest.raises(LLMError):
+        list_models("claude")
+
+
 def test_to_openai_messages_prepends_system():
     msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}]
     out = to_openai_messages(msgs, system="be brief")

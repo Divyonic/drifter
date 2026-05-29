@@ -28,6 +28,9 @@ __all__ = [
     "load_keys",
     "save_key",
     "get_key",
+    "key_url",
+    "curated_models",
+    "list_models",
     "to_openai_messages",
     "to_anthropic_messages",
     "to_gemini_contents",
@@ -38,27 +41,115 @@ class LLMError(RuntimeError):
     """Raised for any provider/SDK/credential problem (with a helpful message)."""
 
 
-# Provider registry: label, default model, SDK package + pip install hint.
-PROVIDERS: Dict[str, Dict[str, str]] = {
+# Provider registry. ``models`` is a curated seed of current API model IDs (as of
+# mid-2026); the desktop app can also fetch the live list from the provider via
+# :func:`list_models`, so this stays useful even as new models ship. ``key_url`` is
+# where the user creates an API key; ``key_hint`` is a one-line "where to find it".
+PROVIDERS: Dict[str, dict] = {
     "claude": {
         "label": "Claude (Anthropic)",
         "default_model": "claude-sonnet-4-6",
         "sdk": "anthropic",
         "pip": "anthropic",
+        "key_url": "https://console.anthropic.com/settings/keys",
+        "key_hint": "Anthropic Console → Settings → API Keys",
+        "models": [
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",
+        ],
     },
     "gemini": {
         "label": "Gemini (Google)",
-        "default_model": "gemini-2.5-flash",
+        "default_model": "gemini-3.5-flash",
         "sdk": "google.genai",
         "pip": "google-genai",
+        "key_url": "https://aistudio.google.com/apikey",
+        "key_hint": "Google AI Studio → Get API key",
+        "models": [
+            "gemini-3.5-flash",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-3.1-flash-lite",
+            "gemini-2.5-flash-lite",
+        ],
     },
     "openai": {
         "label": "OpenAI",
-        "default_model": "gpt-4o",
+        "default_model": "gpt-5.5",
         "sdk": "openai",
         "pip": "openai",
+        "key_url": "https://platform.openai.com/api-keys",
+        "key_hint": "OpenAI Platform → API keys",
+        "models": [
+            "gpt-5.5",
+            "gpt-5.5-pro",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "gpt-5.4-nano",
+            "o3",
+            "o4-mini",
+        ],
     },
 }
+
+
+def key_url(provider: str) -> str:
+    """Where to create an API key for ``provider`` (empty string if unknown)."""
+    return PROVIDERS.get(provider, {}).get("key_url", "")
+
+
+def curated_models(provider: str) -> List[str]:
+    """The built-in seed list of model IDs for ``provider``."""
+    return list(PROVIDERS.get(provider, {}).get("models", []))
+
+
+def list_models(provider: str, api_key: Optional[str] = None) -> List[str]:
+    """Fetch the provider's **live** model catalog via its API (needs a key).
+
+    Returns chat-capable model IDs, most useful first. Raises :class:`LLMError`
+    on a missing key, missing SDK, or network/API failure.
+    """
+    if provider not in PROVIDERS:
+        raise LLMError(f"Unknown provider {provider!r}.")
+    key = api_key or get_key(provider)
+    if not key:
+        raise LLMError("Add an API key first, then refresh.")
+    try:
+        if provider == "claude":
+            import anthropic  # type: ignore
+
+            client = anthropic.Anthropic(api_key=key)
+            return [m.id for m in client.models.list().data]
+        if provider == "openai":
+            import openai  # type: ignore
+
+            client = openai.OpenAI(api_key=key)
+            ids = [m.id for m in client.models.list().data]
+            chat = sorted(
+                i for i in ids
+                if i.startswith(("gpt", "o1", "o3", "o4", "o5", "chatgpt"))
+            )
+            return chat or sorted(ids)
+        # gemini
+        from google import genai  # type: ignore
+
+        client = genai.Client(api_key=key)
+        out: List[str] = []
+        for m in client.models.list():
+            name = (getattr(m, "name", "") or "").split("/")[-1]
+            if name and "gemini" in name and "embedding" not in name and "image" not in name:
+                out.append(name)
+        return out
+    except LLMError:
+        raise
+    except Exception as exc:  # network/auth/SDK issues
+        pip = PROVIDERS[provider]["pip"]
+        raise LLMError(
+            f"Couldn't fetch models for {PROVIDERS[provider]['label']}: {exc} "
+            f"(is the SDK installed — pip install {pip} — and the key valid?)"
+        ) from exc
 
 
 # --------------------------------------------------------------------------- #
