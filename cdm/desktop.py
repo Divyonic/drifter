@@ -14,13 +14,23 @@ from __future__ import annotations
 import os
 import random
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QKeySequence, QShortcut
+from PySide6.QtCore import QEventLoop, QPropertyAnimation, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import (
+    QColor,
+    QDesktopServices,
+    QFont,
+    QIcon,
+    QKeySequence,
+    QPainter,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -43,6 +53,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QScrollArea,
+    QSplashScreen,
     QStackedWidget,
     QSplitter,
     QVBoxLayout,
@@ -175,6 +186,70 @@ def _hairline() -> QFrame:
     f = QFrame()
     f.setObjectName("hairline")
     return f
+
+
+def _asset(name: str) -> str:
+    """Absolute path to a bundled asset under cdm/assets/."""
+    return str(Path(__file__).resolve().parent / "assets" / name)
+
+
+def logo_pixmap(height: int = 28) -> QPixmap:
+    """The [DRIFTER] logo scaled to ``height`` px (empty pixmap if missing)."""
+    pm = QPixmap(_asset("drifter_logo.png"))
+    if pm.isNull():
+        return pm
+    return pm.scaledToHeight(int(height), Qt.SmoothTransformation)
+
+
+def logo_label(height: int = 26) -> QWidget:
+    """A fixed top-left brand mark: the logo, or a text fallback."""
+    lab = QLabel()
+    pm = logo_pixmap(height)
+    if not pm.isNull():
+        lab.setPixmap(pm)
+    else:
+        lab.setText("[DRIFTER]")
+        lab.setObjectName("h2")
+    return lab
+
+
+def show_splash(app: QApplication) -> None:
+    """Show the logo splash, fade it in then out, and return when done."""
+    pm = logo_pixmap(height=150)
+    if pm.isNull():
+        return
+    canvas = QPixmap(560, 340)
+    canvas.fill(QColor("#FFFFFF"))  # the logo is designed for a white field
+    painter = QPainter(canvas)
+    painter.drawPixmap((560 - pm.width()) // 2, (340 - pm.height()) // 2, pm)
+    painter.end()
+
+    splash = QSplashScreen(canvas)
+    splash.setWindowOpacity(0.0)
+    splash.show()
+    app.processEvents()
+
+    fade_in = QPropertyAnimation(splash, b"windowOpacity")
+    fade_in.setDuration(350)
+    fade_in.setStartValue(0.0)
+    fade_in.setEndValue(1.0)
+    fade_in.start()
+    splash._fade_in = fade_in  # keep a reference so it isn't GC'd
+
+    loop = QEventLoop()
+
+    def _fade_out() -> None:
+        fade_out = QPropertyAnimation(splash, b"windowOpacity")
+        fade_out.setDuration(550)
+        fade_out.setStartValue(1.0)
+        fade_out.setEndValue(0.0)
+        fade_out.finished.connect(loop.quit)
+        fade_out.start()
+        splash._fade_out = fade_out
+
+    QTimer.singleShot(1000, _fade_out)
+    loop.exec()
+    splash.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -590,6 +665,7 @@ class OnboardingWizard(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(40, 34, 40, 30)
         root.setSpacing(16)
+        root.addWidget(logo_label(28))
         self.step_label = QLabel()
         self.step_label.setObjectName("muted")
         self.title = QLabel()
@@ -868,6 +944,7 @@ class ClaudeCodeDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(32, 28, 32, 24)
         root.setSpacing(12)
+        root.addWidget(logo_label(26))
         title = QLabel("Monitor your Claude Code terminal")
         title.setObjectName("h1")
         root.addWidget(title)
@@ -938,6 +1015,7 @@ class LaunchDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(36, 32, 36, 28)
         root.setSpacing(14)
+        root.addWidget(logo_label(28))
         name = load_profile_name()
         hello = QLabel(time_greeting(name))
         hello.setObjectName("h1")
@@ -1127,6 +1205,8 @@ class MainWindow(QMainWindow):
         outer.setSpacing(14)
 
         head = QHBoxLayout()
+        head.addWidget(logo_label(24))
+        head.addSpacing(8)
         back_btn = QPushButton("‹ Sessions")
         back_btn.setToolTip("Back to the session menu (your work is saved)")
         back_btn.clicked.connect(self._go_back)
@@ -1622,6 +1702,9 @@ def main() -> int:
     except Exception:
         pass
     app.setFont(QFont("-apple-system", 13))
+    app.setWindowIcon(QIcon(_asset("drifter_icon.png")))
+
+    show_splash(app)  # logo, fades in then out
 
     from cdm.storage import Store
 

@@ -47,4 +47,4 @@ Repository = "https://github.com/Divyonic/drifter"
 packages = ["cdm"]
 
 [tool.setuptools.package-data]
-cdm = ["*.json"]
+cdm = ["*.json", "assets/*.png"]
