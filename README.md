@@ -61,6 +61,17 @@ drifter
    **corrective prompt** appears. Hit **Send to re-align** (or **Copy**). With
    *Auto re-align* on, Drifter folds the corrective prompt into the next request for you.
 
+**New session → launch Claude Code for you.** In **New session**, tick *"Open a new
+Claude Code session in Terminal, seeded with this goal"* and pick a folder. Drifter
+opens a fresh `claude` session in Terminal — seeded with your goal + constraints (as
+the first message *and* an appended system prompt) — then auto-detects its transcript
+and attaches to monitor it. Your Drifter anchor and the Claude Code session share the
+same goal automatically.
+
+**Connecting your AI** shows a live **status** (● connected / ○ not connected) and a
+**Test connection** button; the **model dropdown** is pre-filled with each provider's
+latest models, and Test/Refresh loads the provider's live list.
+
 **Already chatting in Claude Code (the terminal)?** Click **"Monitor Claude Code…"** on
 the launch screen and pick your session. Drifter tails its transcript
 (`~/.claude/projects/…`) and draws the drift graph **live** while you keep working in

@@ -13,8 +13,12 @@ from __future__ import annotations
 
 import json
 import os
+import platform
+import shlex
+import shutil
+import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 __all__ = [
     "projects_dir",
@@ -22,6 +26,9 @@ __all__ = [
     "extract_turn",
     "parse_transcript_file",
     "ClaudeCodeTail",
+    "snapshot_transcripts",
+    "find_new_transcript",
+    "launch_claude_in_terminal",
 ]
 
 # Noise we never want to treat as a real user turn (slash-command echoes, the
@@ -163,6 +170,74 @@ def list_sessions(limit: int = 40) -> List[Dict]:
             "mtime": mtime,
         })
     return out
+
+
+def snapshot_transcripts() -> Set[str]:
+    """Set of all transcript paths under the projects dir (call before launching)."""
+    root = projects_dir()
+    if not root.exists():
+        return set()
+    out: Set[str] = set()
+    for proj in root.iterdir():
+        if proj.is_dir():
+            out.update(str(p) for p in proj.glob("*.jsonl"))
+    return out
+
+
+def find_new_transcript(before: Set[str], cwd: Optional[str] = None) -> Optional[str]:
+    """Newest transcript that wasn't in ``before`` (prefer one whose cwd matches)."""
+    root = projects_dir()
+    if not root.exists():
+        return None
+    fresh = []
+    for proj in root.iterdir():
+        if not proj.is_dir():
+            continue
+        for p in proj.glob("*.jsonl"):
+            sp = str(p)
+            if sp in before:
+                continue
+            try:
+                fresh.append((p.stat().st_mtime, sp))
+            except OSError:
+                continue
+    if not fresh:
+        return None
+    fresh.sort(reverse=True)
+    if cwd:
+        for _mt, sp in fresh:
+            if _cwd_of(sp) == cwd:
+                return sp
+    return fresh[0][1]
+
+
+def launch_claude_in_terminal(
+    cwd: str, kickoff: str, anchor: Optional[str] = None, name: Optional[str] = None
+) -> bool:
+    """Open a new Terminal window running an interactive ``claude`` session.
+
+    Seeds it with ``kickoff`` (first prompt), ``anchor`` (appended system prompt) and
+    an optional session ``name``. macOS only (uses Terminal.app via osascript);
+    returns False on other platforms or any failure so the caller can degrade.
+    """
+    if platform.system() != "Darwin":
+        return False
+    exe = shutil.which("claude") or "claude"
+    args = [exe]
+    if name:
+        args += ["-n", name]
+    if anchor:
+        args += ["--append-system-prompt", anchor]
+    if kickoff:
+        args += [kickoff]
+    command = "cd " + shlex.quote(cwd) + " && " + " ".join(shlex.quote(a) for a in args)
+    escaped = command.replace("\\", "\\\\").replace('"', '\\"')
+    script = f'tell application "Terminal"\n  activate\n  do script "{escaped}"\nend tell'
+    try:
+        subprocess.run(["osascript", "-e", script], check=True, capture_output=True, timeout=15)
+        return True
+    except Exception:
+        return False
 
 
 class ClaudeCodeTail:

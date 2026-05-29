@@ -69,6 +69,33 @@ def test_tail_start_at_end_then_appends(tmp_path):
     assert tail.new_turns() == []  # not re-emitted
 
 
+def test_snapshot_and_find_new_transcript(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    from cdm import claude_code as cc
+
+    proj = tmp_path / "projects" / "-Users-me-proj"
+    proj.mkdir(parents=True)
+    old = proj / "old.jsonl"
+    _write(old, [{"type": "user", "uuid": "1", "cwd": "/Users/me/proj",
+                  "message": {"role": "user", "content": "hi"}}])
+    before = cc.snapshot_transcripts()
+    assert str(old) in before
+
+    new = proj / "new.jsonl"
+    _write(new, [{"type": "user", "uuid": "2", "cwd": "/Users/me/proj",
+                  "message": {"role": "user", "content": "goal"}}])
+    assert cc.find_new_transcript(before, cwd="/Users/me/proj") == str(new)
+    # nothing new relative to the current snapshot
+    assert cc.find_new_transcript(cc.snapshot_transcripts()) is None
+
+
+def test_launch_returns_false_off_mac(monkeypatch):
+    from cdm import claude_code as cc
+
+    monkeypatch.setattr(cc.platform, "system", lambda: "Linux")
+    assert cc.launch_claude_in_terminal("/tmp", "hello") is False
+
+
 def test_tail_waits_for_complete_line(tmp_path):
     p = tmp_path / "t.jsonl"
     p.write_text("")

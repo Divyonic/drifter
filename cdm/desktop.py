@@ -164,7 +164,15 @@ def _apply_theme(dark: bool, store=None) -> None:
     set_dark(dark)
     app = QApplication.instance()
     if app is not None:
-        app.setStyleSheet(build_qss())
+        # Batch the restyle: freeze top-level widgets so Qt repaints once (no flicker).
+        tops = app.topLevelWidgets()
+        for w in tops:
+            w.setUpdatesEnabled(False)
+        try:
+            app.setStyleSheet(build_qss())
+        finally:
+            for w in tops:
+                w.setUpdatesEnabled(True)
     if store is not None:
         try:
             store.set_meta("theme", "dark" if dark else "light")
@@ -627,8 +635,25 @@ class ProviderSetup(QWidget):
         self.hint.setObjectName("muted")
         self.hint.setWordWrap(True)
 
+        self.status_lbl = QLabel()
+        self.test_btn = QPushButton("Test connection")
+        self.test_btn.clicked.connect(self._test_connection)
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.addWidget(self.status_lbl, 1)
+        status_row.addWidget(self.test_btn)
+
+        self.model_caption = QLabel(
+            "Pick a model from the list (or type one). ‘Refresh’ / ‘Test connection’ loads "
+            "your provider's live list."
+        )
+        self.model_caption.setObjectName("muted")
+        self.model_caption.setWordWrap(True)
+
         form.addRow("Provider", self.provider)
+        form.addRow("Status", self._wrap(status_row))
         form.addRow("Model", self._wrap(model_row))
+        form.addRow("", self.model_caption)
         form.addRow("API key", self._wrap(key_row))
         form.addRow("", self.hint)
 
@@ -636,6 +661,36 @@ class ProviderSetup(QWidget):
         self.get_key_btn.clicked.connect(self._open_key_url)
         self.refresh_btn.clicked.connect(self._refresh_models)
         self._load(self._current(), model)
+
+    def _set_status(self, ok: bool, text: str) -> None:
+        color = "#1B7F3B" if ok else C["danger"]
+        self.status_lbl.setText(f"<span style='color:{color}'>{'●' if ok else '○'}</span> {text}")
+
+    def _test_connection(self) -> None:
+        provider = self._current()
+        if PROVIDERS[provider].get("keyless"):
+            ready = claude_cli_available()
+            self._set_status(ready, "Claude Code installed — ready (no key needed)"
+                             if ready else "Claude Code not found — install it")
+            return
+        key = self.key.text().strip() or get_key(provider)
+        if not key:
+            self._set_status(False, "No API key entered")
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            ids = list_models(provider, key)
+        except LLMError as exc:
+            QApplication.restoreOverrideCursor()
+            self._set_status(False, "Connection failed")
+            QMessageBox.warning(self, "Drifter", str(exc))
+            return
+        QApplication.restoreOverrideCursor()
+        current = self.model.currentText()
+        self.model.clear()
+        self.model.addItems(ids or curated_models(provider))
+        self.model.setCurrentText(current if current in ids else (ids[0] if ids else current))
+        self._set_status(True, f"Connected — {len(ids)} models loaded")
 
     @staticmethod
     def _wrap(layout) -> QWidget:
@@ -670,6 +725,14 @@ class ProviderSetup(QWidget):
                 f"Where to find it: {meta['key_hint']}. Click ‘Get an API key’, sign in, "
                 "create a key, paste it here. Stored only on this Mac."
             )
+        if keyless:
+            ready = claude_cli_available()
+            self._set_status(ready, "Claude Code installed — ready"
+                             if ready else "Claude Code not found")
+        else:
+            ready = bool(get_key(provider))
+            self._set_status(ready, "API key saved — connected"
+                             if ready else "Not connected — add an API key")
 
     def _open_key_url(self) -> None:
         QDesktopServices.openUrl(QUrl(key_url(self._current())))
@@ -968,6 +1031,26 @@ class NewSessionDialog(QDialog):
         form.addRow("Goal", self.goal)
         form.addRow("Constraints", self.constraints)
         lay.addLayout(form)
+
+        # Optionally spin up a fresh Claude Code session seeded with this goal.
+        self.cc_check = QCheckBox("Open a new Claude Code session in Terminal, seeded with this goal")
+        self.cc_check.setChecked(claude_cli_available())
+        self.cc_check.setEnabled(claude_cli_available())
+        if not claude_cli_available():
+            self.cc_check.setToolTip("Install Claude Code (the `claude` CLI) to enable this.")
+        lay.addWidget(self.cc_check)
+        dir_row = QHBoxLayout()
+        folder_lbl = QLabel("Folder")
+        folder_lbl.setObjectName("muted")
+        self.cc_dir_edit = QLineEdit(str(Path.home()))
+        self.cc_dir_edit.setToolTip("Working directory for the new Claude Code session")
+        browse = QPushButton("Choose…")
+        browse.clicked.connect(self._browse)
+        dir_row.addWidget(folder_lbl)
+        dir_row.addWidget(self.cc_dir_edit, 1)
+        dir_row.addWidget(browse)
+        lay.addLayout(dir_row)
+
         row = QHBoxLayout()
         cancel = QPushButton("Cancel")
         create = QPushButton("Create")
@@ -978,6 +1061,17 @@ class NewSessionDialog(QDialog):
         row.addWidget(cancel)
         row.addWidget(create)
         lay.addLayout(row)
+
+    def _browse(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, "Working directory", self.cc_dir_edit.text())
+        if d:
+            self.cc_dir_edit.setText(d)
+
+    def open_in_cc(self) -> bool:
+        return self.cc_check.isChecked() and claude_cli_available()
+
+    def cc_dir(self) -> str:
+        return self.cc_dir_edit.text().strip() or str(Path.home())
 
     def values(self):
         cons = [c.strip() for c in self.constraints.toPlainText().splitlines() if c.strip()]
@@ -997,6 +1091,23 @@ def start_cc_monitoring(monitor: DriftMonitor, cc_path: str) -> Optional[str]:
     if rest:
         monitor.ingest_transcript(session.session_id, rest)
     return session.session_id
+
+
+def _cc_anchor(goal: str, constraints: List[str]) -> str:
+    """System-prompt text that anchors a launched Claude Code session to the goal."""
+    s = f"For this session, the user's goal is: {goal}."
+    if constraints:
+        s += " Hard constraints: " + "; ".join(constraints) + "."
+        s += " Stay anchored to this goal and respect these constraints."
+    return s
+
+
+def _cc_kickoff(goal: str, constraints: List[str]) -> str:
+    """First user message seeded into a launched Claude Code session."""
+    s = f"My goal for this session: {goal}."
+    if constraints:
+        s += " Constraints: " + "; ".join(constraints) + "."
+    return s + " Let's get started — how should we approach this?"
 
 
 class ClaudeCodeDialog(QDialog):
@@ -1146,14 +1257,62 @@ class LaunchDialog(QDialog):
 
     def _new(self) -> None:
         dlg = NewSessionDialog(self)
-        if dlg.exec() == QDialog.Accepted:
-            name, goal, cons = dlg.values()
-            if not goal:
-                QMessageBox.warning(self, "Drifter", "A goal is required.")
-                return
-            session = self.monitor.start_session(name or "Untitled", goal, cons)
-            self.chosen_session_id = session.session_id
-            self.accept()
+        if dlg.exec() != QDialog.Accepted:
+            return
+        name, goal, cons = dlg.values()
+        if not goal:
+            QMessageBox.warning(self, "Drifter", "A goal is required.")
+            return
+        session = self.monitor.start_session(name or "Untitled", goal, cons)
+        if dlg.open_in_cc():
+            self.chosen_tail_path = self._launch_and_attach_cc(
+                dlg.cc_dir(), goal, cons, name or "Drifter session"
+            )
+        self.chosen_session_id = session.session_id
+        self.accept()
+
+    def _launch_and_attach_cc(self, cwd, goal, cons, name) -> Optional[str]:
+        """Open a seeded Claude Code session in Terminal and wait for its transcript."""
+        before = cc.snapshot_transcripts()
+        ok = cc.launch_claude_in_terminal(
+            cwd, kickoff=_cc_kickoff(goal, cons), anchor=_cc_anchor(goal, cons), name=name
+        )
+        if not ok:
+            QMessageBox.warning(
+                self, "Drifter",
+                "Couldn't open a Terminal session. Start `claude` yourself, then use "
+                "‘Monitor Claude Code…’ to attach.",
+            )
+            return None
+        prog = QProgressDialog("Opening Claude Code — waiting for the session…", None, 0, 0, self)
+        prog.setWindowTitle("Drifter")
+        prog.setCancelButton(None)
+        prog.setWindowModality(Qt.WindowModal)
+        prog.show()
+        found = {"path": None}
+        loop = QEventLoop()
+
+        def _tick():
+            p = cc.find_new_transcript(before, cwd)
+            if p:
+                found["path"] = p
+                loop.quit()
+
+        timer = QTimer(self)
+        timer.setInterval(500)
+        timer.timeout.connect(_tick)
+        timer.start()
+        QTimer.singleShot(15000, loop.quit)  # give up after ~15s
+        loop.exec()
+        timer.stop()
+        prog.close()
+        if not found["path"]:
+            QMessageBox.information(
+                self, "Drifter",
+                "Opened Claude Code, but couldn't auto-detect the session yet. Once it's "
+                "running, use ‘Monitor Claude Code…’ to attach it.",
+            )
+        return found["path"]
 
     def _import(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
