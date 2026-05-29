@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "drifter"
+version = "0.1.0"
+description = "Context Drift Monitor — track and correct LLM goal drift in real time, fully offline."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Divyonic" }]
+keywords = ["llm", "context-drift", "alignment", "monitoring", "streamlit", "offline"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "streamlit>=1.37",
+    "numpy>=1.26",
+    "pyperclip>=1.8",
+]
+
+[project.optional-dependencies]
+# Sharper, semantic embeddings (needs wheels for your Python version).
+local = ["sentence-transformers>=2.2"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+drifter = "cdm.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Divyonic/drifter"
+Repository = "https://github.com/Divyonic/drifter"
+
+[tool.setuptools]
+packages = ["cdm"]
+
+[tool.setuptools.package-data]
+cdm = ["*.json"]

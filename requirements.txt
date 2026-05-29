@@ -1,0 +1,10 @@
+# Core runtime (works on Python 3.14, no compiled ML deps).
+# pandas + altair ship transitively with streamlit and are used by the app.
+streamlit>=1.40
+numpy>=1.26
+pyperclip>=1.8   # local clipboard access for automatic turn capture
+
+# --- optional, for higher-quality embeddings (skip on Python 3.14 until wheels exist) ---
+# Install separately if you want neural embeddings instead of the hashing fallback:
+#   pip install sentence-transformers
+# The app auto-detects it; with it absent the pure-Python HashingEmbedder is used.
