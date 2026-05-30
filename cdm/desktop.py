@@ -125,6 +125,11 @@ _LIVE_WINDOWS: list = []
 # fit instead of clipping; build_qss() multiplies font-size/min-height by it.
 _UI_SCALE: float = 1.0
 
+# App-shell page indices (QStackedWidget order).
+PAGE_MONITOR = 0
+PAGE_SESSIONS = 1
+PAGE_SETTINGS = 2
+
 
 def set_dark(dark: bool) -> None:
     """Switch the active palette."""
@@ -209,6 +214,12 @@ QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid @line@; bord
 QCheckBox::indicator:hover { border: 1px solid @accent@; }
 QCheckBox::indicator:checked { background: @accent@; border: 1px solid @accent@; image: url(@checkurl@); }
 QCheckBox::indicator:checked:hover { background: @accent_hover@; border: 1px solid @accent_hover@; }
+/* --- App-shell sidebar --- */
+QFrame#sidebar { background: @panel@; border: none; border-right: 1px solid @line_soft@; }
+QPushButton#navItem { background: transparent; border: none; border-radius: 10px; color: @muted@; text-align: left; padding: 0 14px; min-height: 38px; font-size: 14px; font-weight: 600; }
+QPushButton#navItem:hover { background: @hover@; color: @ink@; }
+QPushButton#navItem:checked { background: @sel@; color: @ink@; font-weight: 700; border-left: 3px solid @accent@; padding-left: 11px; }
+QPushButton#navItem:checked:hover { background: @sel@; }
 """
 
 
@@ -1326,14 +1337,23 @@ class OnboardingWizard(QDialog):
 # --------------------------------------------------------------------------- #
 # Settings (provider/model/key + drift-engine toggle)
 # --------------------------------------------------------------------------- #
-class SettingsDialog(QDialog):
-    def __init__(self, provider: str, model: str, store=None, parent=None) -> None:
-        super().__init__(parent)
-        self.store = store
+class SettingsPage(QWidget):
+    """Settings — page 2 of the app shell (was SettingsDialog).
+
+    No modal Save: :meth:`commit` applies edits when you navigate away or quit. Engine
+    and Appearance still apply instantly on click. Scrolls when short (responsive).
+    """
+
+    def __init__(self, monitor: DriftMonitor, shell) -> None:
+        super().__init__()
+        self.monitor = monitor
+        self.shell = shell
+        self.store = monitor.store
         self._dl: Optional[ModelDownloadThread] = None
-        self.setWindowTitle("Settings")
-        self.resize(560, 660)
-        self.setMinimumSize(500, 420)  # resizable + scrolls when short (responsive)
+        provider = self.store.get_meta("provider")
+        if provider not in PROVIDERS:
+            provider = default_provider()
+        model = self.store.get_meta("model") or PROVIDERS[provider]["default_model"]
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1342,7 +1362,7 @@ class SettingsDialog(QDialog):
         scroll.setWidgetResizable(True)
         content = QWidget()
         lay = QVBoxLayout(content)
-        lay.setContentsMargins(28, 24, 28, 22)
+        lay.setContentsMargins(28, 22, 28, 22)
         lay.setSpacing(16)
 
         title = QLabel("Connect your AI")
@@ -1351,90 +1371,99 @@ class SettingsDialog(QDialog):
         self.setup = ProviderSetup(provider, model)
         lay.addWidget(self.setup)
 
-        if store is not None:
-            lay.addWidget(_hairline())
-            eng = QLabel("Drift engine")
-            eng.setObjectName("h2")
-            lay.addWidget(eng)
-            self.engine_state = QLabel()
-            self.engine_state.setObjectName("muted")
-            self.engine_state.setWordWrap(True)
-            lay.addWidget(self.engine_state)
-            erow = QHBoxLayout()
-            fast_btn = QPushButton("Use fast (offline)")
-            sem_btn = QPushButton("Enable semantic (download once)")
-            fast_btn.clicked.connect(self._use_fast)
-            sem_btn.clicked.connect(self._enable_semantic)
-            erow.addWidget(fast_btn)
-            erow.addWidget(sem_btn)
-            erow.addStretch(1)
-            lay.addLayout(erow)
-            self._sync_engine_label()
+        lay.addWidget(_hairline())
+        eng = QLabel("Drift engine")
+        eng.setObjectName("h2")
+        lay.addWidget(eng)
+        self.engine_state = QLabel()
+        self.engine_state.setObjectName("muted")
+        self.engine_state.setWordWrap(True)
+        lay.addWidget(self.engine_state)
+        erow = QHBoxLayout()
+        fast_btn = QPushButton("Use fast (offline)")
+        sem_btn = QPushButton("Enable semantic (download once)")
+        fast_btn.clicked.connect(self._use_fast)
+        sem_btn.clicked.connect(self._enable_semantic)
+        erow.addWidget(fast_btn)
+        erow.addWidget(sem_btn)
+        erow.addStretch(1)
+        lay.addLayout(erow)
+        self._sync_engine_label()
 
-            self.smart_check = QCheckBox("Smart analysis — let the LLM judge drift (recommended)")
-            self.smart_check.setChecked((store.get_meta("smart") or "on") != "off")
-            self.smart_check.setToolTip(
-                "Uses your connected LLM to understand sub-goals and evolving goals, so "
-                "deep work on part of a big goal isn't flagged as drift. Falls back to the "
-                "offline engine when no LLM is connected."
-            )
-            lay.addWidget(self.smart_check)
+        self.smart_check = QCheckBox("Smart analysis — let the LLM judge drift (recommended)")
+        self.smart_check.setChecked((self.store.get_meta("smart") or "on") != "off")
+        self.smart_check.setToolTip(
+            "Uses your connected LLM to understand sub-goals and evolving goals, so "
+            "deep work on part of a big goal isn't flagged as drift. Falls back to the "
+            "offline engine when no LLM is connected."
+        )
+        lay.addWidget(self.smart_check)
 
-            lay.addWidget(_hairline())
-            capture = QLabel("Web chat capture")
-            capture.setObjectName("h2")
-            lay.addWidget(capture)
-            cap_sub = QLabel(
-                "Monitor a chat in another app (ChatGPT, Gemini…) by copying its replies — "
-                "Drifter scores anything you copy against your goal. Starts a small "
-                "background clipboard watcher; nothing leaves your Mac."
-            )
-            cap_sub.setObjectName("muted")
-            cap_sub.setWordWrap(True)
-            lay.addWidget(cap_sub)
-            self.clip_check = QCheckBox("Capture clipboard")
-            self.clip_check.setChecked(is_watcher_running())
-            lay.addWidget(self.clip_check)
+        lay.addWidget(_hairline())
+        capture = QLabel("Web chat capture")
+        capture.setObjectName("h2")
+        lay.addWidget(capture)
+        cap_sub = QLabel(
+            "Monitor a chat in another app (ChatGPT, Gemini…) by copying its replies — "
+            "Drifter scores anything you copy against your goal. Starts a small "
+            "background clipboard watcher; nothing leaves your Mac."
+        )
+        cap_sub.setObjectName("muted")
+        cap_sub.setWordWrap(True)
+        lay.addWidget(cap_sub)
+        self.clip_check = QCheckBox("Capture clipboard")
+        self.clip_check.setChecked(is_watcher_running())
+        lay.addWidget(self.clip_check)
 
-            lay.addWidget(_hairline())
-            appearance = QLabel("Appearance")
-            appearance.setObjectName("h2")
-            lay.addWidget(appearance)
-            self._theme_choice = store.get_meta("theme") or "auto"
-            if self._theme_choice not in ("auto", "light", "dark"):
-                self._theme_choice = "auto"
-            seg = QHBoxLayout()
-            seg.setSpacing(8)
-            self._theme_btns = {}
-            for key, label in (("auto", "Follow system"), ("light", "Light"), ("dark", "Dark")):
-                btn = QPushButton(label)
-                btn.clicked.connect(lambda _=False, k=key: self._set_theme(k))
-                self._theme_btns[key] = btn
-                seg.addWidget(btn)
-            seg.addStretch(1)
-            lay.addLayout(seg)
-            self._sync_theme_seg()
+        lay.addWidget(_hairline())
+        appearance = QLabel("Appearance")
+        appearance.setObjectName("h2")
+        lay.addWidget(appearance)
+        self._theme_choice = self.store.get_meta("theme") or "auto"
+        if self._theme_choice not in ("auto", "light", "dark"):
+            self._theme_choice = "auto"
+        seg = QHBoxLayout()
+        seg.setSpacing(8)
+        self._theme_btns = {}
+        for key, label in (("auto", "Follow system"), ("light", "Light"), ("dark", "Dark")):
+            btn = QPushButton(label)
+            btn.clicked.connect(lambda _=False, k=key: self._set_theme(k))
+            self._theme_btns[key] = btn
+            seg.addWidget(btn)
+        seg.addStretch(1)
+        lay.addLayout(seg)
+        self._sync_theme_seg()
 
         lay.addStretch(1)
         scroll.setWidget(content)
         root.addWidget(scroll, 1)
 
-        # Footer pinned below the scroll area, always visible.
-        root.addWidget(_hairline())
-        footer = QHBoxLayout()
-        footer.setContentsMargins(28, 12, 28, 16)
-        cancel = QPushButton("Cancel")
-        save = QPushButton("Save")
-        save.setObjectName("primary")
-        cancel.clicked.connect(self.reject)
-        save.clicked.connect(self.accept)
-        footer.addStretch(1)
-        footer.addWidget(cancel)
-        footer.addWidget(save)
-        root.addLayout(footer)
+    # -- shell hooks --------------------------------------------------------- #
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self.refresh()
+
+    def refresh(self) -> None:
+        """Re-read live state (watcher/engine) so navigating back isn't stale."""
+        self.clip_check.setChecked(is_watcher_running())
+        self._sync_engine_label()
+
+    def commit(self) -> None:
+        """Apply provider/model/key/smart/clipboard — on navigate-away and on quit."""
+        provider, model, _key = self.setup.persist()  # persist() also saves the key
+        self.shell.apply_settings(provider, model, self.smart_check.isChecked())
+        self.shell.set_clipboard(self.clip_check.isChecked())  # shell guards changed-only
+
+    def sync_theme(self, choice: str) -> None:
+        self._theme_choice = choice if choice in ("auto", "light", "dark") else "auto"
+        self._sync_theme_seg()
+
+    def _set_theme(self, choice: str) -> None:
+        # Route through the shell so the sidebar toggle + this segment stay in lockstep.
+        self.shell.set_theme(choice)
 
     def _engine_pref(self) -> str:
-        return (self.store.get_meta("embedder") if self.store else None) or config.EMBEDDER_PREFERENCE
+        return self.store.get_meta("embedder") or config.EMBEDDER_PREFERENCE
 
     def _sync_engine_label(self) -> None:
         pref = self._engine_pref()
@@ -1510,20 +1539,11 @@ class SettingsDialog(QDialog):
         self._sync_engine_label()
         QMessageBox.information(self, "Drifter", "Semantic drift enabled. Restart Drifter to apply.")
 
-    def _set_theme(self, choice: str) -> None:
-        """Apply an appearance choice live (restyles the whole app immediately)."""
-        self._theme_choice = choice
-        apply_theme_choice(choice, self.store)
-        self._sync_theme_seg()
-
     def _sync_theme_seg(self) -> None:
         for key, btn in self._theme_btns.items():
             btn.setObjectName("segOn" if key == self._theme_choice else "seg")
             btn.style().unpolish(btn)
             btn.style().polish(btn)
-
-    def result_values(self):
-        return self.setup.persist()
 
 
 class NewSessionDialog(QDialog):
@@ -1696,24 +1716,25 @@ class ClaudeCodeDialog(QDialog):
         self.accept()
 
 
-class LaunchDialog(QDialog):
-    def __init__(self, monitor: DriftMonitor, parent=None) -> None:
-        super().__init__(parent)
+class SessionsPage(QWidget):
+    """The session picker — page 1 of the app shell (was LaunchDialog).
+
+    Picking a session routes through ``shell.open_session``; New session + Settings live
+    in the sidebar. ``refresh()`` re-reads the list (called on navigate-in / after CRUD).
+    """
+
+    def __init__(self, monitor: DriftMonitor, shell) -> None:
+        super().__init__()
         self.monitor = monitor
-        self.chosen_session_id: Optional[str] = None
-        self.chosen_tail_path: Optional[str] = None
-        self.setWindowTitle("Drifter")
-        self.setMinimumSize(580, 620)
+        self.shell = shell
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(36, 32, 36, 28)
+        root.setContentsMargins(28, 22, 28, 22)
         root.setSpacing(14)
-        root.addWidget(logo_label(28))
-        name = load_profile_name()
-        hello = QLabel(time_greeting(name))
-        hello.setObjectName("h1")
-        root.addWidget(hello)
-        prompt = QLabel("Which session do you want to continue today?")
+        self.hello = QLabel(time_greeting(load_profile_name()))
+        self.hello.setObjectName("h1")
+        root.addWidget(self.hello)
+        prompt = QLabel("Which session do you want to continue?")
         prompt.setObjectName("muted")
         root.addWidget(prompt)
 
@@ -1736,21 +1757,19 @@ class LaunchDialog(QDialog):
         root.addLayout(manage)
 
         btns = QHBoxLayout()
-        new_btn = QPushButton("New session")
         imp_btn = QPushButton("Import chat…")
-        conn_btn = QPushButton("Settings")
         cont_btn = QPushButton("Continue")
         cont_btn.setObjectName("primary")
-        new_btn.clicked.connect(self._new)
         imp_btn.clicked.connect(self._import)
-        conn_btn.clicked.connect(self._connect)
         cont_btn.clicked.connect(self._continue)
-        btns.addWidget(new_btn)
         btns.addWidget(imp_btn)
-        btns.addWidget(conn_btn)
         btns.addStretch(1)
         btns.addWidget(cont_btn)
         root.addLayout(btns)
+
+    def refresh(self) -> None:
+        self.hello.setText(time_greeting(load_profile_name()))
+        self._populate()
 
     def _populate(self) -> None:
         self.list.clear()
@@ -1771,65 +1790,6 @@ class LaunchDialog(QDialog):
         item = self.list.currentItem()
         return item.data(Qt.UserRole) if item else None
 
-    def _new(self) -> None:
-        dlg = NewSessionDialog(self)
-        if dlg.exec() != QDialog.Accepted:
-            return
-        name, goal, cons = dlg.values()
-        if not goal:
-            QMessageBox.warning(self, "Drifter", "A goal is required.")
-            return
-        session = self.monitor.start_session(name or "Untitled", goal, cons)
-        if dlg.open_in_cc():
-            self.chosen_tail_path = self._launch_and_attach_cc(
-                dlg.cc_dir(), goal, cons, name or "Drifter session"
-            )
-        self.chosen_session_id = session.session_id
-        self.accept()
-
-    def _launch_and_attach_cc(self, cwd, goal, cons, name) -> Optional[str]:
-        """Open a seeded Claude Code session in Terminal and wait for its transcript."""
-        before = cc.snapshot_transcripts()
-        ok = cc.launch_claude_in_terminal(
-            cwd, kickoff=_cc_kickoff(goal, cons), anchor=_cc_anchor(goal, cons), name=name
-        )
-        if not ok:
-            QMessageBox.warning(
-                self, "Drifter",
-                "Couldn't open a Terminal session. Start `claude` yourself, then use "
-                "‘Monitor Claude Code…’ to attach.",
-            )
-            return None
-        prog = QProgressDialog("Opening Claude Code — waiting for the session…", None, 0, 0, self)
-        prog.setWindowTitle("Drifter")
-        prog.setCancelButton(None)
-        prog.setWindowModality(Qt.WindowModal)
-        prog.show()
-        found = {"path": None}
-        loop = QEventLoop()
-
-        def _tick():
-            p = cc.find_new_transcript(before, cwd)
-            if p:
-                found["path"] = p
-                loop.quit()
-
-        timer = QTimer(self)
-        timer.setInterval(500)
-        timer.timeout.connect(_tick)
-        timer.start()
-        QTimer.singleShot(15000, loop.quit)  # give up after ~15s
-        loop.exec()
-        timer.stop()
-        prog.close()
-        if not found["path"]:
-            QMessageBox.information(
-                self, "Drifter",
-                "Opened Claude Code, but couldn't auto-detect the session yet. Once it's "
-                "running, use ‘Monitor Claude Code…’ to attach it.",
-            )
-        return found["path"]
-
     def _import(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Import a chat transcript", "", "Transcripts (*.json *.md *.txt);;All files (*)"
@@ -1843,8 +1803,7 @@ class LaunchDialog(QDialog):
         session = self.monitor.start_session("Imported chat", turns[0]["text"], [])
         if len(turns) > 1:
             self.monitor.ingest_transcript(session.session_id, turns[1:])
-        self.chosen_session_id = session.session_id
-        self.accept()
+        self.shell.open_session(session.session_id)
 
     def _rename(self) -> None:
         sid = self._selected_id()
@@ -1884,38 +1843,34 @@ class LaunchDialog(QDialog):
         if not sid:
             QMessageBox.warning(self, "Drifter", "That session has no messages yet.")
             return
-        self.chosen_session_id = sid
-        self.chosen_tail_path = dlg.chosen_path
-        self.accept()
-
-    def _connect(self) -> None:
-        provider = self.monitor.store.get_meta("provider") or first_connected_provider() or "claude"
-        if provider not in PROVIDERS:
-            provider = "claude"
-        model = self.monitor.store.get_meta("model") or PROVIDERS[provider]["default_model"]
-        dlg = SettingsDialog(provider, model, self.monitor.store, self)
-        if dlg.exec() == QDialog.Accepted:
-            p, m, _ = dlg.result_values()
-            self.monitor.store.set_meta("provider", p)
-            self.monitor.store.set_meta("model", m or PROVIDERS[p]["default_model"])
+        self.shell.open_session(sid, dlg.chosen_path)
 
     def _continue(self) -> None:
         sid = self._selected_id()
         if not sid:
             QMessageBox.information(self, "Drifter", "Pick a session, or create/import one.")
             return
-        self.chosen_session_id = sid
-        self.accept()
+        self.shell.open_session(sid)
 
 
 # --------------------------------------------------------------------------- #
-# Main window
+# Monitor page (the live chat + drift dashboard for one session)
 # --------------------------------------------------------------------------- #
-class MainWindow(QMainWindow):
-    def __init__(self, monitor: DriftMonitor, session_id: str, tail_path: Optional[str] = None) -> None:
+class MonitorPage(QWidget):
+    """The live chat + drift dashboard for one session — page 0 of the app shell.
+
+    Lifted from the former top-level MainWindow: it owns the 1.5s tick, the streaming
+    ChatThread, the SmartThread, tail mode and the responsive scale. The shell builds a
+    fresh MonitorPage per session and calls :meth:`teardown` on switch (NOT the watcher).
+    """
+
+    def __init__(self, monitor: DriftMonitor, session_id: str,
+                 tail_path: Optional[str] = None, shell=None) -> None:
         super().__init__()
         self.monitor = monitor
         self.session_id = session_id
+        self.shell = shell
+        self._dead = False  # set in teardown(); late thread signals no-op after it
         saved_p = monitor.store.get_meta("provider")
         saved_m = monitor.store.get_meta("model")
         self.provider = saved_p if saved_p in PROVIDERS else default_provider()
@@ -1924,7 +1879,6 @@ class MainWindow(QMainWindow):
         self._stream_label: Optional[QLabel] = None
         self._stream_text = ""
         self._bubbles: List[QWidget] = []
-        self.go_back = False  # set when the user returns to the session menu
         # Smart (LLM) analysis: on by default when a provider is connected.
         self.smart_enabled = (monitor.store.get_meta("smart") or "on") != "off"
         self.smart_verdict: Optional[dict] = None
@@ -1934,9 +1888,6 @@ class MainWindow(QMainWindow):
         self.tail = cc.ClaudeCodeTail(tail_path, start_at_end=True) if tail_path else None
 
         session = monitor.store.get_session(session_id)
-        self.setWindowTitle(f"Drifter — {session.project_name if session else ''}")
-        self.resize(1180, 768)
-        self.setMinimumSize(760, 540)  # stays usable when shrunk (text + charts scale down)
         self._build_ui(session)
         self._refresh_chart()
         self._update_coach()
@@ -1948,37 +1899,46 @@ class MainWindow(QMainWindow):
         self._timer.timeout.connect(self._tick)
         self._timer.start()
         if self not in _LIVE_WINDOWS:
-            _LIVE_WINDOWS.append(self)  # so auto OS theme switches re-pen this window
+            _LIVE_WINDOWS.append(self)  # so auto OS theme switches re-pen this page
+
+    def teardown(self) -> None:
+        """Stop this page's timers/threads on session switch (NOT the watcher)."""
+        self._dead = True
+        try:
+            self._timer.stop()
+        except Exception:
+            pass
+        if self._thread and self._thread.isRunning():
+            self._thread.stop()
+            self._thread.wait(2000)
+        if self._smart_thread and self._smart_thread.isRunning():
+            self._smart_thread.requestInterruption()
+            self._smart_thread.wait(2000)
+        if self in _LIVE_WINDOWS:
+            _LIVE_WINDOWS.remove(self)
+
+    def retint(self) -> None:
+        """Re-pen the chart + legend + gauge for the active palette (theme change)."""
+        self.chart.apply_theme()
+        self._restyle_legend()
+        self._restyle_glance()
 
     # -- layout -------------------------------------------------------------- #
     def _build_ui(self, session) -> None:
-        central = QWidget()
-        self.setCentralWidget(central)
-        outer = QVBoxLayout(central)
-        outer.setContentsMargins(28, 22, 28, 22)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(24, 18, 24, 20)
         outer.setSpacing(14)
 
+        # The sidebar owns brand + nav, so the page header is just the session title
+        # and a live provider chip.
         head = QHBoxLayout()
         head.setSpacing(10)
-        head.addWidget(logo_label(22))
-        back_btn = QPushButton("‹ Sessions")
-        back_btn.setObjectName("ghost")
-        back_btn.setToolTip("Back to the session menu (your work is saved)")
-        back_btn.clicked.connect(self._go_back)
-        head.addWidget(back_btn)
-        head.addWidget(_vsep())
         title = ElidingLabel(session.project_name if session else "Drifter")
         title.setObjectName("title")
         head.addWidget(title, 1)  # takes the slack; elides instead of overflowing
         self.provider_label = QLabel()
         self.provider_label.setObjectName("providerChip")
         head.addWidget(self.provider_label)
-        settings_btn = QPushButton("⚙")
-        settings_btn.setObjectName("iconBtn")
-        settings_btn.setToolTip("Settings")
-        settings_btn.setFixedSize(34, 34)
-        settings_btn.clicked.connect(self._open_settings)
-        head.addWidget(settings_btn)
         outer.addLayout(head)
 
         anchor = QLabel(f"Goal · {session.anchor_goal if session else ''}")
@@ -2253,20 +2213,22 @@ class MainWindow(QMainWindow):
         if hasattr(self, "spark"):
             self.spark.apply_theme()
 
-    def resizeEvent(self, event) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        self._apply_responsive_scale(self.width())
-
     def _apply_responsive_scale(self, width: int) -> None:
-        """Shrink text + control heights on small windows (quantised to avoid churn)."""
-        if width >= 1080:
+        """Shrink text + control heights on small windows (quantised to avoid churn).
+
+        Driven by the shell off the content-pane width (window minus the sidebar).
+        """
+        if width <= 0:
+            return  # during construction/splash the pane has no width yet
+        # Breakpoints are on the CONTENT pane width (window minus the 232px sidebar).
+        if width >= 940:
             scale = 1.0
-        elif width >= 960:
-            scale = 0.93
-        elif width >= 850:
-            scale = 0.87
+        elif width >= 840:
+            scale = 0.94
+        elif width >= 740:
+            scale = 0.88
         else:
-            scale = 0.82
+            scale = 0.84
         global _UI_SCALE
         if abs(scale - _UI_SCALE) < 0.001:
             return
@@ -2389,39 +2351,10 @@ class MainWindow(QMainWindow):
         self.stop_btn.setEnabled(running)
 
     # -- actions ------------------------------------------------------------- #
-    def _go_back(self) -> None:
-        """Return to the session menu without quitting the app (work is saved)."""
-        self.go_back = True
-        self.close()
-
     def _open_settings(self) -> None:
-        dlg = SettingsDialog(self.provider, self.model, self.monitor.store, self)
-        accepted = dlg.exec() == QDialog.Accepted
-        # Appearance can change live inside the dialog — re-tint chart + legend + tiles either way.
-        self.chart.apply_theme()
-        self._restyle_legend()
-        self._restyle_glance()
-        if accepted:
-            provider, model, _ = dlg.result_values()
-            self.provider = provider
-            self.model = model or PROVIDERS[provider]["default_model"]
-            self.monitor.store.set_meta("provider", self.provider)
-            self.monitor.store.set_meta("model", self.model)
-            if hasattr(dlg, "smart_check"):
-                on = dlg.smart_check.isChecked()
-                self.monitor.store.set_meta("smart", "on" if on else "off")
-                self.smart_enabled = on
-                if not on:
-                    self.smart_verdict = None
-            # Clipboard capture lives in Settings now — apply on save (only if changed,
-            # so re-saving doesn't spawn a duplicate watcher).
-            if hasattr(dlg, "clip_check"):
-                want = dlg.clip_check.isChecked()
-                if want != is_watcher_running():
-                    self._on_clip_toggle(want)
-            self._sync_provider_label()
-            self._update_coach()
-            self._refresh_chart()
+        """Open the Settings page (the gear/back are gone; the sidebar owns nav)."""
+        if self.shell is not None:
+            self.shell.navigate(PAGE_SETTINGS)
 
     def _explain_threshold(self) -> None:
         QMessageBox.information(
@@ -2556,13 +2489,15 @@ class MainWindow(QMainWindow):
         self._start_stream(bool(self.auto_check.isChecked() and res.get("alert")))
 
     def _on_chunk(self, delta: str) -> None:
-        if self._stream_label is None:
+        if self._dead or self._stream_label is None:
             return
         self._stream_text += delta
         self._stream_label.setText(self._stream_text + "▍")
         self.chat_scroll.verticalScrollBar().setValue(self.chat_scroll.verticalScrollBar().maximum())
 
     def _on_stream_done(self, full: str) -> None:
+        if self._dead:
+            return
         full = full or self._stream_text
         if self._stream_label is not None:
             self._stream_label.setTextFormat(Qt.RichText)
@@ -2576,6 +2511,8 @@ class MainWindow(QMainWindow):
         self._update_buttons()
 
     def _on_reply_error(self, message: str) -> None:
+        if self._dead:
+            return
         if self._stream_label is not None:
             self._pop_last_bubble()
             self._stream_label = None
@@ -2635,11 +2572,15 @@ class MainWindow(QMainWindow):
         self._smart_thread.start()
 
     def _on_smart_done(self, verdict: dict) -> None:
+        if self._dead:
+            return
         self.smart_verdict = verdict
         self._update_smart_ui()
         self._update_coach()
 
     def _on_smart_failed(self, _msg: str) -> None:
+        if self._dead:
+            return
         # Stay on the offline signal; permit a retry on the next cadence.
         self._last_smart_n = -99
 
@@ -2722,20 +2663,281 @@ class MainWindow(QMainWindow):
         else:
             self.fc_label.setText("Forecast: stable")
 
+
+# --------------------------------------------------------------------------- #
+# App shell: persistent left sidebar + stacked pages
+# --------------------------------------------------------------------------- #
+class Sidebar(QFrame):
+    """The persistent left navigation rail (brand · nav · New · provider · theme)."""
+
+    def __init__(self, shell) -> None:
+        super().__init__()
+        self.shell = shell
+        self.setObjectName("sidebar")
+        self.setFixedWidth(232)  # fixed in code so _UI_SCALE never reflows the rail
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 18, 16, 16)
+        lay.setSpacing(6)
+
+        brand = QHBoxLayout()
+        brand.addWidget(logo_label(22))
+        brand.addStretch(1)
+        lay.addLayout(brand)
+        lay.addSpacing(14)
+
+        self._nav = {}
+        for page, label in (
+            (PAGE_MONITOR, "◎   Monitor"),
+            (PAGE_SESSIONS, "☰   Sessions"),
+            (PAGE_SETTINGS, "⚙   Settings"),
+        ):
+            btn = QPushButton(label)
+            btn.setObjectName("navItem")
+            btn.setCheckable(True)
+            btn.setAutoExclusive(True)
+            btn.clicked.connect(lambda _=False, p=page: self.shell.navigate(p))
+            self._nav[page] = btn
+            lay.addWidget(btn)
+
+        lay.addStretch(1)
+
+        new_btn = QPushButton("+  New session")
+        new_btn.setObjectName("primary")
+        new_btn.clicked.connect(lambda: self.shell.new_session())
+        lay.addWidget(new_btn)
+
+        self.provider_chip = QPushButton("")
+        self.provider_chip.setObjectName("providerChip")
+        self.provider_chip.setCursor(Qt.PointingHandCursor)
+        self.provider_chip.clicked.connect(lambda: self.shell.navigate(PAGE_SETTINGS))
+        lay.addWidget(self.provider_chip)
+
+        lay.addWidget(_hairline())
+        self._theme_choice = "auto"
+        seg = QHBoxLayout()
+        seg.setSpacing(6)
+        self._theme_btns = {}
+        for key, label in (("auto", "Auto"), ("light", "Light"), ("dark", "Dark")):
+            btn = QPushButton(label)
+            btn.clicked.connect(lambda _=False, k=key: self.shell.set_theme(k))
+            self._theme_btns[key] = btn
+            seg.addWidget(btn)
+        lay.addLayout(seg)
+
+    def set_active(self, page: int) -> None:
+        btn = self._nav.get(page)
+        if btn is not None:
+            btn.setChecked(True)
+
+    def set_provider(self, text: str, tip: str = "") -> None:
+        self.provider_chip.setText(text)
+        self.provider_chip.setToolTip(tip)
+
+    def sync_theme(self, choice: str) -> None:
+        self._theme_choice = choice if choice in ("auto", "light", "dark") else "auto"
+        for key, btn in self._theme_btns.items():
+            btn.setObjectName("segOn" if key == self._theme_choice else "seg")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
+
+class AppShell(QMainWindow):
+    """The single persistent window: a Sidebar + a QStackedWidget of three pages."""
+
+    def __init__(self, monitor: DriftMonitor) -> None:
+        super().__init__()
+        self.monitor = monitor
+        self.monitor_page: Optional[MonitorPage] = None
+        self._cur_page = PAGE_SESSIONS
+        self.setWindowTitle("Drifter")
+        self.resize(1180, 768)
+        self.setMinimumSize(980, 580)  # 232 rail + ~750 work area never clips
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        row = QHBoxLayout(central)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        self.sidebar = Sidebar(self)
+        row.addWidget(self.sidebar)
+        self.stack = QStackedWidget()
+        row.addWidget(self.stack, 1)
+
+        # index 0 placeholder until a session opens; sessions/settings built once.
+        self.stack.insertWidget(PAGE_MONITOR, QWidget())
+        self.sessions_page = SessionsPage(monitor, self)
+        self.stack.insertWidget(PAGE_SESSIONS, self.sessions_page)
+        self.settings_page = SettingsPage(monitor, self)
+        self.stack.insertWidget(PAGE_SETTINGS, self.settings_page)
+
+        self.sidebar.sync_theme(monitor.store.get_meta("theme") or "auto")
+        self._sync_provider_chip()
+
+    # -- navigation ---------------------------------------------------------- #
+    def navigate(self, page: int) -> None:
+        if self._cur_page == PAGE_SETTINGS and page != PAGE_SETTINGS:
+            self.settings_page.commit()  # apply pending edits on leave
+        if page == PAGE_MONITOR and self.monitor_page is None:
+            page = PAGE_SESSIONS  # nothing to monitor yet
+        if page == PAGE_SESSIONS:
+            self.sessions_page.refresh()
+        self._cur_page = page
+        self.stack.setCurrentIndex(page)
+        self.sidebar.set_active(page)
+
+    def open_session(self, session_id: str, tail_path: Optional[str] = None) -> None:
+        self.monitor.store.set_active_session(session_id)
+        # Replace whatever sits at index 0 (the placeholder or the previous MonitorPage)
+        # — removing first keeps Sessions/Settings on their fixed indices (insertWidget
+        # at 0 would otherwise shift them down).
+        old = self.stack.widget(PAGE_MONITOR)
+        if self.monitor_page is not None:
+            self.monitor_page.teardown()
+        if old is not None:
+            self.stack.removeWidget(old)
+            old.deleteLater()
+        page = MonitorPage(self.monitor, session_id, tail_path, shell=self)
+        self.stack.insertWidget(PAGE_MONITOR, page)
+        self.monitor_page = page
+        self._sync_provider_chip()
+        self.navigate(PAGE_MONITOR)
+        self._apply_scale()
+
+    def new_session(self) -> None:
+        dlg = NewSessionDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        name, goal, cons = dlg.values()
+        if not goal:
+            QMessageBox.warning(self, "Drifter", "A goal is required.")
+            return
+        session = self.monitor.start_session(name or "Untitled", goal, cons)
+        tail_path = None
+        if dlg.open_in_cc():
+            tail_path = self._launch_and_attach_cc(
+                dlg.cc_dir(), goal, cons, name or "Drifter session"
+            )
+        self.open_session(session.session_id, tail_path)
+
+    def _launch_and_attach_cc(self, cwd, goal, cons, name) -> Optional[str]:
+        """Open a seeded Claude Code session in Terminal and wait for its transcript."""
+        # Pause the active page's tick so it can't fire mid-launch (nested event loop).
+        if self.monitor_page is not None:
+            self.monitor_page._timer.stop()
+        try:
+            before = cc.snapshot_transcripts()
+            ok = cc.launch_claude_in_terminal(
+                cwd, kickoff=_cc_kickoff(goal, cons), anchor=_cc_anchor(goal, cons), name=name
+            )
+            if not ok:
+                QMessageBox.warning(
+                    self, "Drifter",
+                    "Couldn't open a Terminal session. Start `claude` yourself, then use "
+                    "‘Monitor Claude Code…’ to attach.",
+                )
+                return None
+            prog = QProgressDialog("Opening Claude Code — waiting for the session…", None, 0, 0, self)
+            prog.setWindowTitle("Drifter")
+            prog.setCancelButton(None)
+            prog.setWindowModality(Qt.WindowModal)
+            prog.show()
+            found = {"path": None}
+            loop = QEventLoop()
+
+            def _tick():
+                p = cc.find_new_transcript(before, cwd)
+                if p:
+                    found["path"] = p
+                    loop.quit()
+
+            timer = QTimer(self)
+            timer.setInterval(500)
+            timer.timeout.connect(_tick)
+            timer.start()
+            QTimer.singleShot(15000, loop.quit)  # give up after ~15s
+            loop.exec()
+            timer.stop()
+            prog.close()
+            if not found["path"]:
+                QMessageBox.information(
+                    self, "Drifter",
+                    "Opened Claude Code, but couldn't auto-detect the session yet. Once it's "
+                    "running, use ‘Monitor Claude Code…’ to attach it.",
+                )
+            return found["path"]
+        finally:
+            if self.monitor_page is not None:
+                self.monitor_page._timer.start()
+
+    # -- settings / theme / provider / clipboard ----------------------------- #
+    def apply_settings(self, provider: str, model: str, smart: bool) -> None:
+        self.monitor.store.set_meta("provider", provider)
+        self.monitor.store.set_meta("model", model or PROVIDERS.get(provider, {}).get("default_model", model))
+        self.monitor.store.set_meta("smart", "on" if smart else "off")
+        if self.monitor_page is not None:
+            self.monitor_page.provider = provider
+            self.monitor_page.model = self.monitor.store.get_meta("model")
+            self.monitor_page.smart_enabled = smart
+            if not smart:
+                self.monitor_page.smart_verdict = None
+            self.monitor_page._sync_provider_label()
+            self.monitor_page._update_coach()
+            self.monitor_page._refresh_chart()
+        self._sync_provider_chip()
+
+    def set_theme(self, choice: str) -> None:
+        apply_theme_choice(choice, self.monitor.store)
+        self.sidebar.sync_theme(choice)
+        self.settings_page.sync_theme(choice)
+        if self.monitor_page is not None:
+            self.monitor_page.retint()
+
+    def set_clipboard(self, on: bool) -> None:
+        if on == is_watcher_running():
+            return  # changed-only guard avoids spawning a duplicate watcher
+        if on:
+            if self.monitor_page is not None:
+                self.monitor.store.set_active_session(self.monitor_page.session_id)
+            start_watcher_process(db_path=self.monitor.store.db_path)
+        else:
+            stop_watcher()
+
+    def _sync_provider_chip(self) -> None:
+        provider = self.monitor.store.get_meta("provider")
+        if provider not in PROVIDERS:
+            provider = default_provider()
+        model = self.monitor.store.get_meta("model") or PROVIDERS[provider]["default_model"]
+        ready = provider_ready(provider)
+        short = MonitorPage._PROVIDER_SHORT.get(provider, PROVIDERS[provider]["label"])
+        self.sidebar.set_provider(
+            f"{'●' if ready else '○'} {short} · {model}",
+            f"{PROVIDERS[provider]['label']} · {model}" + ("" if ready else "  (not connected)"),
+        )
+        if self.monitor_page is not None:
+            self.monitor_page._sync_provider_label()
+
+    # -- lifecycle ----------------------------------------------------------- #
+    def _apply_scale(self) -> None:
+        if self.monitor_page is not None:
+            self.monitor_page._apply_responsive_scale(self.stack.width())
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._apply_scale()
+
     def closeEvent(self, event) -> None:  # noqa: N802
         try:
-            if self in _LIVE_WINDOWS:
-                _LIVE_WINDOWS.remove(self)
-            self._timer.stop()
-            if self._thread and self._thread.isRunning():
-                self._thread.stop()
-                self._thread.wait(2000)
-            if self._smart_thread and self._smart_thread.isRunning():
-                self._smart_thread.wait(50)
-            if is_watcher_running():
+            self.settings_page.commit()  # don't drop pending Settings edits on quit
+        except Exception:
+            pass
+        if self.monitor_page is not None:
+            self.monitor_page.teardown()
+        try:
+            if is_watcher_running():  # the ONLY place the watcher is stopped
                 stop_watcher()
         except Exception:
             pass
+        _LIVE_WINDOWS.clear()
         super().closeEvent(event)
 
 
@@ -2796,21 +2998,24 @@ def main() -> int:
     pref = store.get_meta("embedder") or config.EMBEDDER_PREFERENCE
     monitor = DriftMonitor(store=store, embedder=safe_embedder(pref))
 
-    # Loop: menu -> session window -> (Back) -> menu … until the user quits.
-    while True:
-        first_run = not load_profile_name() and not monitor.store.list_sessions()
-        dlg: QDialog = OnboardingWizard(monitor) if first_run else LaunchDialog(monitor)
-        if dlg.exec() != QDialog.Accepted or not dlg.chosen_session_id:
-            break
-        monitor.store.set_active_session(dlg.chosen_session_id)
-        window = MainWindow(
-            monitor, dlg.chosen_session_id, tail_path=getattr(dlg, "chosen_tail_path", None)
-        )
-        window.show()
-        app.exec()  # returns when the window closes
-        if not window.go_back:
-            break  # closed via the window button / quit -> exit the app
-    return 0
+    # One-time onboarding stays a modal, shown ONCE before the shell exists.
+    first_run = not load_profile_name() and not monitor.store.list_sessions()
+    boot_session = None
+    boot_tail = None
+    if first_run:
+        wiz = OnboardingWizard(monitor)
+        if wiz.exec() == QDialog.Accepted and getattr(wiz, "chosen_session_id", None):
+            boot_session = wiz.chosen_session_id
+            boot_tail = getattr(wiz, "chosen_tail_path", None)
+
+    # One persistent shell, one app.exec() — no modal loop.
+    shell = AppShell(monitor)
+    if boot_session:
+        shell.open_session(boot_session, boot_tail)  # land on Monitor
+    else:
+        shell.navigate(PAGE_SESSIONS)                 # land on the picker
+    shell.show()
+    return app.exec()
 
 
 if __name__ == "__main__":
