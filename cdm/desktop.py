@@ -220,6 +220,8 @@ QPushButton#navItem { background: transparent; border: none; border-radius: 10px
 QPushButton#navItem:hover { background: @hover@; color: @ink@; }
 QPushButton#navItem:checked { background: @sel@; color: @ink@; font-weight: 700; border-left: 3px solid @accent@; padding-left: 11px; }
 QPushButton#navItem:checked:hover { background: @sel@; }
+QPushButton#railToggle { background: transparent; border: none; border-radius: 8px; color: @muted@; font-size: 22px; font-weight: 600; padding: 0; }
+QPushButton#railToggle:hover { background: @hover@; color: @ink@; }
 """
 
 
@@ -1973,8 +1975,8 @@ class MonitorPage(QWidget):
         # compact cards (right) — fills the width instead of leaving a gulf.
         body = QHBoxLayout()
         body.setSpacing(14)
-        body.addWidget(self._build_chat_panel(), 5)     # chat (full message width visible)
-        body.addWidget(self._build_chart_center(), 5)   # chart + threshold + corrective
+        body.addWidget(self._build_chat_panel(), 6)     # chat gets the most room (clearly visible)
+        body.addWidget(self._build_chart_center(), 4)   # chart + threshold + corrective
         body.addWidget(self._build_rail())              # slim card rail (fixed width)
         outer.addLayout(body, 1)
         self._sync_provider_label()
@@ -2318,20 +2320,22 @@ class MonitorPage(QWidget):
         bubble.setObjectName("bubbleUser" if is_user else "bubbleAsst")
         bubble.setWordWrap(True)
         bubble.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        bubble.setMaximumWidth(440)  # caps wide bubbles; wraps to the column otherwise
+        bubble.setMaximumWidth(760)  # sanity cap on very wide windows
         if rich:
             bubble.setTextFormat(Qt.RichText)
             bubble.setText(_md_to_html(text))
         else:
             bubble.setTextFormat(Qt.PlainText)
             bubble.setText(text)
+        # Bubble takes ~84% of the column (layout-driven, so it can never overflow or
+        # clip); a small gutter on the sender's side preserves the chat read.
         wrap = QHBoxLayout()
         if is_user:
-            wrap.addStretch(1)
-            wrap.addWidget(bubble)
+            wrap.addStretch(16)
+            wrap.addWidget(bubble, 84)
         else:
-            wrap.addWidget(bubble)
-            wrap.addStretch(1)
+            wrap.addWidget(bubble, 84)
+            wrap.addStretch(16)
         container = QWidget()
         container.setLayout(wrap)
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, container)
@@ -2761,8 +2765,8 @@ class Sidebar(QFrame):
         brand = QHBoxLayout()
         self.logo = logo_label(22)
         self.toggle_btn = QPushButton("‹")
-        self.toggle_btn.setObjectName("iconBtn")
-        self.toggle_btn.setFixedSize(30, 30)
+        self.toggle_btn.setObjectName("railToggle")
+        self.toggle_btn.setFixedSize(36, 36)
         self.toggle_btn.setToolTip("Collapse the sidebar")
         self.toggle_btn.clicked.connect(lambda: self.shell.toggle_sidebar())
         brand.addWidget(self.logo)
