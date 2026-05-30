@@ -121,6 +121,10 @@ C = dict(LIGHT)  # current palette (mutated by set_dark)
 # legend swatches (QSS alone doesn't repaint pyqtgraph pens or painted pixmaps).
 _LIVE_WINDOWS: list = []
 
+# Global UI scale (1.0 = full). Lowered on small windows so text + controls shrink to
+# fit instead of clipping; build_qss() multiplies font-size/min-height by it.
+_UI_SCALE: float = 1.0
+
 
 def set_dark(dark: bool) -> None:
     """Switch the active palette."""
@@ -209,13 +213,21 @@ QCheckBox::indicator:checked:hover { background: @accent_hover@; border: 1px sol
 
 
 def build_qss() -> str:
-    """Render the stylesheet against the active palette ``C``."""
+    """Render the stylesheet against the active palette ``C`` and the global UI scale."""
     s = _QSS
     for key, value in C.items():
         s = s.replace(f"@{key}@", value)
     # A bundled white tick for the checked checkbox. Qt's QSS url() wants a plain
     # absolute path (a file:// URI gets treated as relative); forward slashes are safe.
     s = s.replace("@checkurl@", _asset("check.svg").replace("\\", "/"))
+    # Responsive: scale text + control heights down on small windows.
+    if abs(_UI_SCALE - 1.0) > 0.001:
+        import re
+
+        def _scale(m):
+            return f"{m.group(1)}: {max(9, round(int(m.group(2)) * _UI_SCALE))}px"
+
+        s = re.sub(r"(font-size|min-height):\s*(\d+)px", _scale, s)
     return s
 
 
@@ -535,7 +547,7 @@ class DriftChart(pg.PlotWidget):
         dgr = QColor(C["danger"])
         self._danger = pg.LinearRegionItem(
             orientation="horizontal", movable=False,
-            brush=pg.mkBrush(dgr.red(), dgr.green(), dgr.blue(), 18), pen=pg.mkPen(None),
+            brush=pg.mkBrush(dgr.red(), dgr.green(), dgr.blue(), 10), pen=pg.mkPen(None),
         )
         self._danger.setZValue(-20)
         self.addItem(self._danger)
@@ -602,20 +614,24 @@ class DriftChart(pg.PlotWidget):
         r = self._rvals[idx] if idx < len(self._rvals) else 0.0
         role = self._roles[idx] if idx < len(self._roles) else ""
         text = self._texts[idx] if idx < len(self._texts) else ""
-        snippet = (text[:52] + "…") if len(text) > 52 else text
+        snippet = (text[:46] + "…") if len(text) > 46 else text
         self._cross_v.setPos(turn)
         self._cross_h.setPos(a)
         self._cross_v.show()
         self._cross_h.show()
-        # flip the tooltip to the left near the right edge so it stays on-screen
-        rng = self.getViewBox().viewRange()[0]
-        anchor_x = 1.0 if (rng[1] - turn) < (rng[1] - rng[0]) * 0.35 else 0.0
-        self._hover.setAnchor((anchor_x, 1))
+        # Keep the tooltip on-screen: flip left near the right edge, and flip BELOW the
+        # point when it's high in the view (so it never runs off the top or sits on the
+        # legend). anchor=(x,1) hangs above the point; (x,0) hangs below it.
+        (xr0, xr1), (yr0, yr1) = self.getViewBox().viewRange()
+        anchor_x = 1.0 if (xr1 - turn) < (xr1 - xr0) * 0.35 else 0.0
+        high_in_view = a > (yr0 + yr1) / 2.0
+        anchor_y = 0.0 if high_in_view else 1.0
+        self._hover.setAnchor((anchor_x, anchor_y))
         self._hover.setText(
             f"turn {turn} · {role}\ndrift {a:.2f}  ·  ref {r:.2f}"
             + (f"\n{snippet}" if snippet else "")
         )
-        self._hover.setPos(turn, min(2.0, a + 0.04))
+        self._hover.setPos(turn, a - 0.03 if high_in_view else a + 0.04)
         self._hover.show()
 
     def apply_theme(self) -> None:
@@ -632,7 +648,7 @@ class DriftChart(pg.PlotWidget):
             self._cp.setPen(pg.mkPen(C["muted"], width=1.0, style=Qt.DashLine))
             self._cross_v.setPen(pg.mkPen(_rgba(C["muted"], 110), width=1))
             self._cross_h.setPen(pg.mkPen(_rgba(C["muted"], 110), width=1))
-            self._danger.setBrush(_rgba(C["danger"], 18))
+            self._danger.setBrush(_rgba(C["danger"], 10))
             self._band.setBrush(_rgba(C["muted"], 22))
         except Exception:
             pass
@@ -718,7 +734,7 @@ class DriftGauge(QWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("driftGauge")
-        self.setMinimumSize(150, 130)
+        self.setMinimumSize(116, 100)
         self._value = 0.0
         self._threshold = 0.65
         self._caption = "on track"
@@ -758,8 +774,9 @@ class DriftGauge(QWidget):
         pad = 16
         rect = QRectF((w - side) / 2 + pad, (h - side) / 2 + pad + 6,
                       side - 2 * pad, side - 2 * pad)
+        aw = max(5.0, side * 0.058)  # arc width scales with the gauge size
         # Track.
-        track = QPen(_rgba(C["line"], 150), 9)
+        track = QPen(_rgba(C["line"], 150), aw)
         track.setCapStyle(Qt.RoundCap)
         p.setPen(track)
         p.drawArc(rect, int(self._START * 16), int(self._SWEEP * 16))
@@ -767,7 +784,7 @@ class DriftGauge(QWidget):
         import math
         cx, cy = rect.center().x(), rect.center().y()
         r_out = rect.width() / 2 + 3
-        r_in = r_out - 6
+        r_in = r_out - max(4.0, aw * 0.7)
         p.setPen(QPen(_rgba(C["muted"], 120), 1))
         for i in range(31):
             a = math.radians(self._START + self._SWEEP * (i / 30.0))
@@ -775,7 +792,7 @@ class DriftGauge(QWidget):
                        QPointF(cx + r_out * math.cos(a), cy - r_out * math.sin(a)))
         # Coloured fill up to value.
         col = QColor(_drift_color(self._value, self._threshold))
-        fill = QPen(col, 9)
+        fill = QPen(col, aw)
         fill.setCapStyle(Qt.RoundCap)
         p.setPen(fill)
         p.drawArc(rect, int(self._START * 16), int(self._SWEEP * self._frac(self._value) * 16))
@@ -784,18 +801,18 @@ class DriftGauge(QWidget):
         p.setPen(QPen(QColor(C["danger"]), 2))
         p.drawLine(QPointF(cx + (r_in - 4) * math.cos(ta), cy - (r_in - 4) * math.sin(ta)),
                    QPointF(cx + (r_out + 2) * math.cos(ta), cy - (r_out + 2) * math.sin(ta)))
-        # Centre value + caption.
+        # Centre value + caption — sizes scale with the gauge so they shrink when small.
         p.setPen(QColor(C["ink"]))
         f = QFont(self.font())
-        f.setPointSizeF(30)
+        f.setPointSizeF(max(13.0, side * 0.20))
         f.setWeight(QFont.DemiBold)
         p.setFont(f)
         p.drawText(rect, int(Qt.AlignCenter), f"{self._value:.2f}")
         p.setPen(QColor(C["muted"]))
         fc = QFont(self.font())
-        fc.setPointSizeF(10.5)
+        fc.setPointSizeF(max(7.5, side * 0.072))
         p.setFont(fc)
-        cap_rect = QRectF(rect.left(), cy + 18, rect.width(), 22)
+        cap_rect = QRectF(rect.left(), cy + side * 0.13, rect.width(), 22)
         p.drawText(cap_rect, int(Qt.AlignHCenter | Qt.AlignTop), self._caption)
         p.end()
 
@@ -1919,7 +1936,7 @@ class MainWindow(QMainWindow):
         session = monitor.store.get_session(session_id)
         self.setWindowTitle(f"Drifter — {session.project_name if session else ''}")
         self.resize(1180, 768)
-        self.setMinimumSize(820, 560)  # stays usable when shrunk
+        self.setMinimumSize(700, 520)  # stays usable when shrunk (text + charts scale down)
         self._build_ui(session)
         self._refresh_chart()
         self._update_coach()
@@ -1990,7 +2007,7 @@ class MainWindow(QMainWindow):
 
     def _build_chat_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(340)
+        panel.setMinimumWidth(300)
         lay = QVBoxLayout(panel)
         lay.setContentsMargins(0, 0, 8, 0)
         lay.setSpacing(10)
@@ -2044,7 +2061,7 @@ class MainWindow(QMainWindow):
 
     def _build_drift_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(360)
+        panel.setMinimumWidth(320)
         lay = QVBoxLayout(panel)
         lay.setContentsMargins(8, 0, 0, 0)
         lay.setSpacing(12)
@@ -2227,6 +2244,33 @@ class MainWindow(QMainWindow):
             self.gauge.apply_theme()
         if hasattr(self, "spark"):
             self.spark.apply_theme()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._apply_responsive_scale(self.width())
+
+    def _apply_responsive_scale(self, width: int) -> None:
+        """Shrink text + control heights on small windows (quantised to avoid churn)."""
+        if width >= 1080:
+            scale = 1.0
+        elif width >= 960:
+            scale = 0.93
+        elif width >= 850:
+            scale = 0.87
+        else:
+            scale = 0.82
+        global _UI_SCALE
+        if abs(scale - _UI_SCALE) < 0.001:
+            return
+        _UI_SCALE = scale
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(build_qss())
+        # Painter widgets aren't QSS-driven — nudge them to repaint at the new scale.
+        if hasattr(self, "chart"):
+            self.chart.apply_theme()
+        self._restyle_legend()
+        self._restyle_glance()
 
     # -- chat bubbles -------------------------------------------------------- #
     def _add_bubble(self, role: str, text: str, rich: bool = False) -> QLabel:
