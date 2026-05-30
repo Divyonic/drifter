@@ -117,7 +117,12 @@ QLabel#h2 { font-size: 17px; font-weight: 600; }
 QLabel#muted { color: @muted@; }
 QLabel#anchor { color: @muted@; font-size: 12px; }
 QLabel#coach { background: @coach_bg@; color: @coach_fg@; border-radius: 12px; padding: 11px 15px; font-weight: 600; }
+QLabel#warn { color: @coach_fg@; font-size: 12px; font-weight: 600; padding: 2px 2px; }
+QLabel#legend { color: @muted@; font-size: 12px; }
+QLabel#sectionLabel { color: @muted@; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
 QFrame#card { background: @bg@; border: 1px solid @line_soft@; border-radius: 16px; }
+QFrame#toolbar { background: @panel@; border: 1px solid @line_soft@; border-radius: 14px; }
+QFrame#details { background: @panel@; border: 1px solid @line_soft@; border-radius: 14px; }
 QFrame#hairline { background: @line@; max-height: 1px; min-height: 1px; border: none; }
 QPushButton { background: @bg@; color: @ink@; border: 1px solid @line@; border-radius: 10px; padding: 9px 16px; font-weight: 600; }
 QPushButton:hover { background: @hover@; }
@@ -127,6 +132,9 @@ QPushButton#primary:hover { background: @accent_hover@; }
 QPushButton#primary:disabled { background: @line@; }
 QPushButton#link { background: transparent; border: none; color: @accent@; padding: 9px 6px; font-weight: 600; }
 QPushButton#link:hover { color: @accent_hover@; }
+QPushButton#seg { background: @panel@; color: @muted@; border: 1px solid @line_soft@; border-radius: 9px; padding: 7px 16px; font-weight: 600; }
+QPushButton#seg:hover { color: @ink@; }
+QPushButton#segOn { background: @bg@; color: @ink@; border: 1px solid @accent@; border-radius: 9px; padding: 7px 16px; font-weight: 700; }
 QLineEdit, QPlainTextEdit, QComboBox, QDoubleSpinBox { background: @input@; border: 1px solid @line@; border-radius: 10px; padding: 9px 11px; selection-background-color: @sel@; selection-color: @ink@; }
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border: 1px solid @accent@; }
 QComboBox::drop-down { border: none; width: 22px; }
@@ -161,11 +169,29 @@ def is_dark() -> bool:
 
 
 def _apply_theme(dark: bool, store=None) -> None:
-    """Switch palette, restyle the app live, and (optionally) persist the choice."""
+    """Pin light/dark and restyle live (kept for callers that think in booleans)."""
+    apply_theme_choice("dark" if dark else "light", store)
+
+
+def system_is_dark() -> bool:
+    """Best-effort read of the OS colour scheme (defaults to light)."""
+    try:
+        return QApplication.instance().styleHints().colorScheme() == Qt.ColorScheme.Dark
+    except Exception:
+        return False
+
+
+def apply_theme_choice(choice: str, store=None) -> None:
+    """Apply an explicit appearance choice: ``auto`` / ``light`` / ``dark``.
+
+    ``auto`` follows the OS now and keeps following it (persisted as ``auto`` so the
+    live colour-scheme listener stays active); ``light`` / ``dark`` pin the palette.
+    """
+    choice = choice if choice in ("auto", "light", "dark") else "auto"
+    dark = system_is_dark() if choice == "auto" else (choice == "dark")
     set_dark(dark)
     app = QApplication.instance()
     if app is not None:
-        # Batch the restyle: freeze top-level widgets so Qt repaints once (no flicker).
         tops = app.topLevelWidgets()
         for w in tops:
             w.setUpdatesEnabled(False)
@@ -176,7 +202,7 @@ def _apply_theme(dark: bool, store=None) -> None:
                 w.setUpdatesEnabled(True)
     if store is not None:
         try:
-            store.set_meta("theme", "dark" if dark else "light")
+            store.set_meta("theme", choice)
         except Exception:
             pass
 
@@ -954,6 +980,25 @@ class SettingsDialog(QDialog):
             )
             lay.addWidget(self.smart_check)
 
+            lay.addWidget(_hairline())
+            appearance = QLabel("Appearance")
+            appearance.setObjectName("h2")
+            lay.addWidget(appearance)
+            self._theme_choice = store.get_meta("theme") or "auto"
+            if self._theme_choice not in ("auto", "light", "dark"):
+                self._theme_choice = "auto"
+            seg = QHBoxLayout()
+            seg.setSpacing(8)
+            self._theme_btns = {}
+            for key, label in (("auto", "Follow system"), ("light", "Light"), ("dark", "Dark")):
+                btn = QPushButton(label)
+                btn.clicked.connect(lambda _=False, k=key: self._set_theme(k))
+                self._theme_btns[key] = btn
+                seg.addWidget(btn)
+            seg.addStretch(1)
+            lay.addLayout(seg)
+            self._sync_theme_seg()
+
         row = QHBoxLayout()
         cancel = QPushButton("Cancel")
         save = QPushButton("Save")
@@ -1006,6 +1051,18 @@ class SettingsDialog(QDialog):
             self.store.set_meta("embedder", "semantic")
         self._sync_engine_label()
         QMessageBox.information(self, "Drifter", "Semantic drift enabled. Restart Drifter to apply.")
+
+    def _set_theme(self, choice: str) -> None:
+        """Apply an appearance choice live (restyles the whole app immediately)."""
+        self._theme_choice = choice
+        apply_theme_choice(choice, self.store)
+        self._sync_theme_seg()
+
+    def _sync_theme_seg(self) -> None:
+        for key, btn in self._theme_btns.items():
+            btn.setObjectName("segOn" if key == self._theme_choice else "seg")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
 
     def result_values(self):
         return self.setup.persist()
@@ -1421,11 +1478,11 @@ class MainWindow(QMainWindow):
         session = monitor.store.get_session(session_id)
         self.setWindowTitle(f"Drifter — {session.project_name if session else ''}")
         self.resize(1180, 768)
+        self.setMinimumSize(820, 560)  # stays usable when shrunk
         self._build_ui(session)
         self._refresh_chart()
         self._update_coach()
         self._update_buttons()
-        self._update_theme_btn()
         self._update_threshold_warning(self.monitor.threshold)
 
         self._timer = QTimer(self)
@@ -1455,11 +1512,6 @@ class MainWindow(QMainWindow):
         self.provider_label = QLabel()
         self.provider_label.setObjectName("muted")
         head.addWidget(self.provider_label)
-        self.theme_btn = QPushButton()
-        self.theme_btn.setObjectName("link")
-        self.theme_btn.setToolTip("Toggle light / dark mode")
-        self.theme_btn.clicked.connect(self._toggle_theme)
-        head.addWidget(self.theme_btn)
         settings_btn = QPushButton("Settings")
         settings_btn.clicked.connect(self._open_settings)
         head.addWidget(settings_btn)
@@ -1477,14 +1529,21 @@ class MainWindow(QMainWindow):
         outer.addWidget(_hairline())
 
         split = QSplitter(Qt.Horizontal)
+        split.setHandleWidth(10)
+        split.setChildrenCollapsible(False)
         split.addWidget(self._build_chat_panel())
         split.addWidget(self._build_drift_panel())
-        split.setSizes([590, 560])
+        # Proportional resize: both panes grow/shrink with the window instead of one
+        # pane eating all the extra space.
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 1)
+        split.setSizes([600, 560])
         outer.addWidget(split, 1)
         self._sync_provider_label()
 
     def _build_chat_panel(self) -> QWidget:
         panel = QWidget()
+        panel.setMinimumWidth(340)
         lay = QVBoxLayout(panel)
         lay.setContentsMargins(0, 0, 8, 0)
         lay.setSpacing(10)
@@ -1538,6 +1597,7 @@ class MainWindow(QMainWindow):
 
     def _build_drift_panel(self) -> QWidget:
         panel = QWidget()
+        panel.setMinimumWidth(360)
         lay = QVBoxLayout(panel)
         lay.setContentsMargins(8, 0, 0, 0)
         lay.setSpacing(12)
@@ -1562,18 +1622,25 @@ class MainWindow(QMainWindow):
         cc = QVBoxLayout(chart_card)
         cc.setContentsMargins(12, 12, 12, 12)
         self.chart = DriftChart()
-        self.chart.setMinimumHeight(250)
+        self.chart.setMinimumHeight(200)  # shrinks with the window, stays legible
         cc.addWidget(self.chart)
         _shadow(chart_card)
         lay.addWidget(chart_card, 1)
 
-        th_row = QHBoxLayout()
+        # One tidy control bar: threshold + auto re-align live here; everything
+        # explanatory is tucked into the collapsible "Details" panel below.
+        bar = QFrame()
+        bar.setObjectName("toolbar")
+        th_row = QHBoxLayout(bar)
+        th_row.setContentsMargins(14, 10, 12, 10)
+        th_row.setSpacing(8)
         th_lbl = QLabel("Threshold")
         th_lbl.setObjectName("muted")
         self.threshold_spin = QDoubleSpinBox()
         self.threshold_spin.setRange(0.30, 0.95)
         self.threshold_spin.setSingleStep(0.01)
         self.threshold_spin.setValue(round(self.monitor.threshold, 2))
+        self.threshold_spin.setFixedWidth(86)
         self.threshold_spin.setToolTip(
             "How far the conversation may drift from your goal before Drifter warns you.\n"
             "Lower = stricter. Drift: 0 = on goal, 1 = unrelated."
@@ -1581,28 +1648,37 @@ class MainWindow(QMainWindow):
         self.threshold_spin.valueChanged.connect(self._on_threshold)
         help_btn = QPushButton("?")
         help_btn.setObjectName("link")
-        help_btn.setFixedWidth(26)
+        help_btn.setFixedWidth(24)
         help_btn.setToolTip("What does the threshold mean?")
         help_btn.clicked.connect(self._explain_threshold)
         self.auto_check = QCheckBox("Auto re-align")
         self.auto_check.setChecked(True)
-        self.clip_check = QCheckBox("Capture clipboard")
-        self.clip_check.setChecked(is_watcher_running())
-        self.clip_check.toggled.connect(self._on_clip_toggle)
+        self.auto_check.setToolTip("Fold the corrective prompt into the next reply automatically when drift fires.")
+        self.details_btn = QPushButton("Details ▾")
+        self.details_btn.setObjectName("link")
+        self.details_btn.setToolTip("Legend, drift explanation, and clipboard capture")
+        self.details_btn.clicked.connect(self._toggle_details)
         th_row.addWidget(th_lbl)
         th_row.addWidget(self.threshold_spin)
         th_row.addWidget(help_btn)
         th_row.addStretch(1)
         th_row.addWidget(self.auto_check)
-        th_row.addWidget(self.clip_check)
-        lay.addLayout(th_row)
+        th_row.addWidget(self.details_btn)
+        lay.addWidget(bar)
 
+        # Extreme-threshold caption — subtle inline hint, only when at an extreme.
         self.threshold_warn = QLabel("")
-        self.threshold_warn.setObjectName("coach")  # highlighted box
+        self.threshold_warn.setObjectName("warn")
         self.threshold_warn.setWordWrap(True)
         self.threshold_warn.setVisible(False)
         lay.addWidget(self.threshold_warn)
 
+        # Collapsible details: legend + plain-language explanation + clipboard capture.
+        self.details_panel = QFrame()
+        self.details_panel.setObjectName("details")
+        dl = QVBoxLayout(self.details_panel)
+        dl.setContentsMargins(14, 12, 14, 12)
+        dl.setSpacing(8)
         legend = QLabel(
             f"<span style='color:{C['accent']}'>●</span> <b>orange</b> = drift from your "
             f"<b>original goal</b> &nbsp;&nbsp;"
@@ -1610,8 +1686,10 @@ class MainWindow(QMainWindow):
             f"<b>recent conversation</b> &nbsp;&nbsp;"
             f"<span style='color:{C['danger']}'>●</span> alert threshold &nbsp;&nbsp;▭ normal range"
         )
+        legend.setObjectName("legend")
         legend.setTextFormat(Qt.RichText)
-        lay.addWidget(legend)
+        legend.setWordWrap(True)
+        dl.addWidget(legend)
         explain = QLabel(
             "Drift 0 = right on your goal · 1 = unrelated. Above the red line = off-track; "
             "the shaded band is what’s normal for this chat, so rising above it signals a "
@@ -1619,11 +1697,13 @@ class MainWindow(QMainWindow):
         )
         explain.setObjectName("muted")
         explain.setWordWrap(True)
-        lay.addWidget(explain)
-
-        self.smart_label = QLabel("")
-        self.smart_label.setWordWrap(True)
-        lay.addWidget(self.smart_label)
+        dl.addWidget(explain)
+        self.clip_check = QCheckBox("Capture clipboard — monitor a web chat by copying its replies")
+        self.clip_check.setChecked(is_watcher_running())
+        self.clip_check.toggled.connect(self._on_clip_toggle)
+        dl.addWidget(self.clip_check)
+        self.details_panel.setVisible(False)
+        lay.addWidget(self.details_panel)
 
         self.corr_card = QFrame()
         self.corr_card.setObjectName("card")
@@ -1754,17 +1834,12 @@ class MainWindow(QMainWindow):
         self.go_back = True
         self.close()
 
-    def _update_theme_btn(self) -> None:
-        self.theme_btn.setText("☀️ Light" if is_dark() else "🌙 Dark")
-
-    def _toggle_theme(self) -> None:
-        _apply_theme(not is_dark(), self.monitor.store)
-        self.chart.apply_theme()
-        self._update_theme_btn()
-
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self.provider, self.model, self.monitor.store, self)
-        if dlg.exec() == QDialog.Accepted:
+        accepted = dlg.exec() == QDialog.Accepted
+        # Appearance can change live inside the dialog — re-tint the chart either way.
+        self.chart.apply_theme()
+        if accepted:
             provider, model, _ = dlg.result_values()
             self.provider = provider
             self.model = model or PROVIDERS[provider]["default_model"]
@@ -1776,7 +1851,6 @@ class MainWindow(QMainWindow):
                 self.smart_enabled = on
                 if not on:
                     self.smart_verdict = None
-                    self.smart_label.setText("")
             self._sync_provider_label()
             self._update_coach()
             self._refresh_chart()
@@ -1809,6 +1883,13 @@ class MainWindow(QMainWindow):
             self.threshold_warn.setVisible(True)
         else:
             self.threshold_warn.setVisible(False)
+
+    def _toggle_details(self) -> None:
+        # Key off the explicit hidden flag (not isVisible, which also reflects whether
+        # an ancestor is shown) so the toggle is deterministic.
+        show = self.details_panel.isHidden()
+        self.details_panel.setVisible(show)
+        self.details_btn.setText("Details ▴" if show else "Details ▾")
 
     def _on_threshold(self, value: float) -> None:
         self.monitor.set_threshold(float(value))
@@ -1954,13 +2035,14 @@ class MainWindow(QMainWindow):
         self._last_smart_n = -99
 
     def _update_smart_ui(self) -> None:
-        """Smart verdict (when present) is authoritative over the offline cosine chip."""
+        """Smart verdict (when present) is authoritative over the offline cosine chip.
+
+        The verdict's reason is surfaced in the coach bar (see ``_update_coach``);
+        here it only drives the status chip and the corrective card.
+        """
         v = self.smart_verdict
         if not v:
-            self.smart_label.setText("")
             return
-        emoji = {"on_track": "✅", "sub_task": "🧩", "evolved": "🔄", "drifting": "⚠️"}
-        self.smart_label.setText(f"🧠 Smart: {emoji.get(v['status'], '')} {v.get('reason', '')}")
         if v["status"] == "drifting":
             self.chip.setText("DRIFTING")
             self.chip.setObjectName("chipBad")

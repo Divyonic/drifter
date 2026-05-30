@@ -25,7 +25,12 @@ drifter
 
 `drifter` opens the native desktop app and walks you through a 3-step setup
 (welcome → connect your AI with a "Get an API key ↗" link → your goal). Replies
-stream in, drift tracks live, and the UI follows macOS light/dark.
+stream in, drift tracks live, and the monitor view stays clean — the chart leads, a
+single control bar holds the threshold + *Auto re-align*, and the legend, plain-language
+explanation and clipboard capture tuck into a collapsible **Details** panel.
+
+**Appearance** lives in **Settings → Appearance**: a segmented **Follow system / Light /
+Dark** control that applies instantly and is remembered. (Default follows macOS.)
 
 - `[llm]` — chat SDKs (Claude / Gemini / OpenAI).
 - `[semantic]` — `fastembed` for **neural** drift (onnxruntime, **no torch**;
