@@ -132,6 +132,10 @@ _QSS = """
 * { font-family: "-apple-system", "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Helvetica", sans-serif; }
 QWidget { background: @bg@; color: @ink@; font-size: 13px; }
 QMainWindow, QDialog { background: @bg@; }
+/* Plain labels carry no background — only chips/pills/bubbles (which set their own)
+   should have a fill. Without this, every label is white and shows as a box on cards. */
+QLabel { background: transparent; }
+QWidget#driftGauge, QWidget#sparkline { background: transparent; }
 QLabel#h1 { font-size: 26px; font-weight: 600; }
 QLabel#h2 { font-size: 17px; font-weight: 600; }
 QLabel#title { font-size: 18px; font-weight: 600; color: @ink@; }
@@ -713,6 +717,7 @@ class DriftGauge(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("driftGauge")
         self.setMinimumSize(150, 130)
         self._value = 0.0
         self._threshold = 0.65
@@ -800,6 +805,7 @@ class Sparkline(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setObjectName("sparkline")
         self.setMinimumHeight(28)
         self._vals: list = []
         self._threshold = 0.65
