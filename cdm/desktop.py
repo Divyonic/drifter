@@ -1936,7 +1936,7 @@ class MainWindow(QMainWindow):
         session = monitor.store.get_session(session_id)
         self.setWindowTitle(f"Drifter — {session.project_name if session else ''}")
         self.resize(1180, 768)
-        self.setMinimumSize(700, 520)  # stays usable when shrunk (text + charts scale down)
+        self.setMinimumSize(760, 540)  # stays usable when shrunk (text + charts scale down)
         self._build_ui(session)
         self._refresh_chart()
         self._update_coach()
@@ -2061,14 +2061,13 @@ class MainWindow(QMainWindow):
 
     def _build_drift_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(320)
+        panel.setMinimumWidth(380)  # holds the cards column + the chart side by side
         lay = QVBoxLayout(panel)
         lay.setContentsMargins(8, 0, 0, 0)
         lay.setSpacing(12)
 
-        # Dashboard metric strip: a drift gauge tile + a status/forecast tile.
-        lay.addWidget(self._build_metric_strip())
-
+        # The chart sits alone (gets full height); the Drift + Status cards stack in a
+        # narrow column beside it, so nothing squeezes the graph.
         chart_card = QFrame()
         chart_card.setObjectName("card")
         cc = QVBoxLayout(chart_card)
@@ -2091,7 +2090,22 @@ class MainWindow(QMainWindow):
         cc.addWidget(_hairline())
         cc.addWidget(self._build_legend_strip())  # small, always-visible key inside the card
         _shadow(chart_card)
-        lay.addWidget(chart_card, 1)
+
+        cards_col = QWidget()
+        ccv = QVBoxLayout(cards_col)
+        ccv.setContentsMargins(0, 0, 0, 0)
+        ccv.setSpacing(12)
+        ccv.addWidget(self._build_gauge_card())
+        ccv.addWidget(self._build_status_card())
+        ccv.addStretch(1)
+        cards_col.setMinimumWidth(172)
+        cards_col.setMaximumWidth(232)
+
+        top = QHBoxLayout()
+        top.setSpacing(12)
+        top.addWidget(cards_col, 0)
+        top.addWidget(chart_card, 1)
+        lay.addLayout(top, 1)
 
         # One tidy control bar: threshold + auto re-align live here. Everything
         # explanatory lives in the legend (above) and the "?" help dialog.
@@ -2160,14 +2174,8 @@ class MainWindow(QMainWindow):
         self.corr_card.setVisible(False)
         return panel
 
-    def _build_metric_strip(self) -> QWidget:
-        """A dashboard metric strip: a drift gauge tile + a status/forecast tile."""
-        strip = QWidget()
-        row = QHBoxLayout(strip)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(12)
-
-        # -- gauge tile -- #
+    def _build_gauge_card(self) -> QFrame:
+        """The drift gauge tile (icon + title + turns, then the animated gauge)."""
         gcard = QFrame()
         gcard.setObjectName("statCard")
         gv = QVBoxLayout(gcard)
@@ -2191,9 +2199,10 @@ class MainWindow(QMainWindow):
         self.gauge = DriftGauge()
         gv.addWidget(self.gauge, 1)
         _shadow(gcard, blur=22, dy=5, alpha=18)
-        row.addWidget(gcard, 3)
+        return gcard
 
-        # -- status / forecast tile -- #
+    def _build_status_card(self) -> QFrame:
+        """The status/forecast tile (pill + reason + sparkline + forecast line)."""
         scard = QFrame()
         scard.setObjectName("statCard")
         sv = QVBoxLayout(scard)
@@ -2227,9 +2236,7 @@ class MainWindow(QMainWindow):
         self.fc_label.setWordWrap(True)
         sv.addWidget(self.fc_label)
         _shadow(scard, blur=22, dy=5, alpha=18)
-        row.addWidget(scard, 4)
-        strip.setMaximumHeight(176)  # stay compact so the chart card gets the height
-        return strip
+        return scard
 
     def _set_status(self, kind: str, pill_text: str, reason: str) -> None:
         """Set the status tile's pill (pillOk/pillBad/pillWarn) + reason line."""
