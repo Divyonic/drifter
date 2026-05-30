@@ -1950,7 +1950,7 @@ class MonitorPage(QWidget):
     # -- layout -------------------------------------------------------------- #
     def _build_ui(self, session) -> None:
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 18, 24, 20)
+        outer.setContentsMargins(32, 20, 32, 22)  # breathing room from the window edges
         outer.setSpacing(14)
 
         # The sidebar owns brand + nav + the provider chip, so the page header is just
@@ -1977,8 +1977,8 @@ class MonitorPage(QWidget):
         # compact cards (right) — fills the width instead of leaving a gulf.
         body = QHBoxLayout()
         body.setSpacing(14)
-        body.addWidget(self._build_chat_panel(), 6)     # chat gets the most room (clearly visible)
-        body.addWidget(self._build_chart_center(), 4)   # chart + threshold + corrective
+        body.addWidget(self._build_chat_panel(), 11)    # chat stays the larger pane
+        body.addWidget(self._build_chart_center(), 9)   # chart wide enough for its toolbar
         body.addWidget(self._build_rail())              # slim card rail (fixed width)
         outer.addLayout(body, 1)
         self._sync_provider_label()
@@ -2110,9 +2110,9 @@ class MonitorPage(QWidget):
         help_btn.setFixedWidth(24)
         help_btn.setToolTip("What does the threshold mean?")
         help_btn.clicked.connect(self._explain_threshold)
-        self.auto_check = QCheckBox("Auto")
+        self.auto_check = QCheckBox("Auto re-align")
         self.auto_check.setChecked(True)
-        self.auto_check.setToolTip("Auto re-align — fold the corrective prompt into the next reply automatically when drift fires.")
+        self.auto_check.setToolTip("Fold the corrective prompt into the next reply automatically when drift fires.")
         th_row.addWidget(th_lbl)
         th_row.addWidget(self.threshold_spin)
         th_row.addWidget(help_btn)
@@ -2943,9 +2943,9 @@ class AppShell(QMainWindow):
         self._cur_page = PAGE_SESSIONS
         self.setWindowTitle("Drifter")
         self.resize(1280, 800)
-        # sidebar(232) + chat(240) + chart(280) + rail(238) + gaps all fit at the min,
-        # so the chat is never clipped ("shows half") on a small window.
-        self.setMinimumSize(1030, 600)
+        # sidebar(232) + page padding(64) + chat(240) + chart(280) + rail(238) + gaps all
+        # fit at the min, so the chat is never clipped ("shows half") on a small window.
+        self.setMinimumSize(1100, 600)
 
         central = QWidget()
         self.setCentralWidget(central)
