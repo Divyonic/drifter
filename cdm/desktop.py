@@ -129,7 +129,7 @@ def set_dark(dark: bool) -> None:
 
 
 _QSS = """
-* { font-family: "SF Mono", "JetBrains Mono", "Menlo", "Cascadia Code", "Consolas", monospace; }
+* { font-family: "-apple-system", "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Helvetica", sans-serif; }
 QWidget { background: @bg@; color: @ink@; font-size: 13px; }
 QMainWindow, QDialog { background: @bg@; }
 QLabel#h1 { font-size: 26px; font-weight: 600; }
@@ -2727,11 +2727,10 @@ def main() -> int:
         app.styleHints().colorSchemeChanged.connect(_on_scheme)
     except Exception:
         pass
-    mono = QFont()
-    mono.setFamilies(["SF Mono", "JetBrains Mono", "Menlo", "Cascadia Code", "Consolas", "monospace"])
-    mono.setPointSize(13)
-    mono.setStyleHint(QFont.Monospace)
-    app.setFont(mono)
+    ui_font = QFont()
+    ui_font.setFamilies(["-apple-system", "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Helvetica"])
+    ui_font.setPointSize(13)
+    app.setFont(ui_font)
     app.setWindowIcon(QIcon(_asset("drifter_icon.png")))
 
     show_splash(app)  # logo, fades in then out
