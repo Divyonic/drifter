@@ -3,6 +3,8 @@
 A **native desktop app** that watches your LLM conversation drift away from its
 original goal **in real time**, and re-aligns it with one click when it does.
 
+![Drifter — the Monitor screen: a gimbal-design chat drifting into off-topic chatter, caught live by the drift gauge, chart and status rail](docs/screenshot.png)
+
 Over a long session an assistant slowly *forgets the goal* — it loosens early
 constraints, accumulates small deviations, and ends up answering something adjacent
 to, but no longer aligned with, what you actually wanted. Drifter chats with your LLM
@@ -25,27 +27,24 @@ drifter
 
 `drifter` opens the native desktop app — a **left-sidebar shell** (brand · Monitor ·
 Sessions · Settings · "+ New session" · provider chip · Auto/Light/Dark) with the live
-**Monitor** as the main pane; Sessions and Settings are sidebar pages, not pop-ups. First
-launch walks you through a 3-step setup (welcome → connect your AI with a "Get an API
-key ↗" link → your goal). Replies stream in and drift tracks live on a clean **card
-dashboard**: the drift chart sits alone with a **drift gauge** + **status** card column
-beside it. (Older builds opened a session-picker dialog then a separate window.)
+**Monitor** as the main pane; Sessions and Settings are sidebar pages, not pop-ups. The
+sidebar **collapses** to a slim icon rail (the brand moves to the top-right) when you want
+more room. First launch walks you through a 3-step setup (welcome → connect your AI with a
+"Get an API key ↗" link → your goal).
 
-The Monitor lays out as three columns — **chat** · a **hero drift chart** (the main
-instrument; click any point to jump to that message) · a slim **rail** of cards. The
-rail stacks a **drift gauge** tile (an
-animated radial gauge with the live value, tick marks and a threshold notch), a **status**
-tile (an on-track/drifting pill, a one-line reason, a live drift **sparkline**, and a
-forecast — "crosses in ~N turns" / "stable"), and the detailed **drift chart** card below
-(with a small always-visible legend whose swatches match the actual chart lines:
-Goal · Recent context · Threshold · Normal range). A single control bar holds the
-threshold + *Auto re-align*; the deeper explanation lives behind the "?".
+The Monitor is three columns: **chat** (left) · a **hero drift chart** (centre — the main
+instrument; click any point to jump to that message) · a slim **card rail** (right). The
+rail stacks a **drift gauge** (an animated radial gauge with the live value, tick marks and
+a threshold notch), a **status** card (an on-track/drifting pill, a one-line reason, a live
+**sparkline**, and a forecast — "crosses in ~N turns" / "stable"), and a **Focus & sub-goals**
+card. The chart carries a small always-visible legend whose swatches match the actual lines
+(Goal · Recent context · Threshold · Normal range); a control bar holds the threshold +
+*Auto re-align*, and the corrective prompt slides in beneath it when drift fires. The coach
+bar only speaks up when there's something to act on.
 
-**Appearance** lives in **Settings → Appearance**: a segmented **Follow system / Light /
-Dark** control that applies instantly and is remembered. (Default follows macOS.) The
-header carries a gear ⚙ for Settings and a compact provider chip; long session titles
-elide instead of overflowing. **Clipboard capture** for web chats now lives in
-**Settings → Web chat capture**.
+**Appearance** is the segmented **Follow system / Light / Dark** control in the sidebar
+(and in **Settings → Appearance**); it applies instantly and is remembered. **Clipboard
+capture** for web chats lives in **Settings → Web chat capture**.
 
 **Pick an exact model.** For both the Claude API and your Claude subscription, the model
 list offers the floating aliases (`opus`/`sonnet`/`haiku`, always latest) **and** pinned
@@ -70,10 +69,12 @@ drifter
 
 ## How to use it
 
-1. **Launch** → Drifter asks *which session you want to continue today*. Pick a past
-   session, start a **New session** (project + goal + constraints), or **Import** a
-   past chat transcript (JSON / `User:`-`Assistant:` markdown) to resume monitoring it.
-2. **Connect your AI** (Settings, or step 2 of setup). Two ways, no billing surprises:
+1. **Open Drifter** → it lands on the **Sessions** page (or your last session). From the
+   sidebar: **+ New session** (project + goal + constraints), **Sessions** to
+   continue / rename / delete a past one, or **Import** a chat transcript
+   (JSON / `User:`-`Assistant:` markdown) to resume monitoring it.
+2. **Connect your AI** — the **Settings** page in the sidebar (or step 2 of first-run
+   setup). Two ways, no billing surprises:
    - **No API key — use your Claude subscription.** If you have [Claude Code](https://claude.com/claude-code)
      installed and signed in (Pro/Max), pick **“Claude — your subscription (no key)”**.
      Drifter drives the local `claude` CLI; nothing metered, no key.
