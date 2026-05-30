@@ -1,12 +1,12 @@
-# Context Drift Monitor — Module Interface Contract
+# Context Drift Monitor - Module Interface Contract
 
 This is the **binding contract** for every module. The shared dataclasses live in
-`cdm/models.py` and config in `cdm/config.py` (already written — import, do not
+`cdm/models.py` and config in `cdm/config.py` (already written - import, do not
 redefine). Implement exactly the public signatures below. All vectors are
 `list[float]`, unit-normalised by the embedder. Python 3.14, standard library +
 `numpy` only for the core package (the Streamlit app may use `pandas`/`altair`,
 which ship with `streamlit`). **`sentence-transformers` is OPTIONAL** and may be
-absent — the package MUST import and run without it.
+absent - the package MUST import and run without it.
 
 Code style: type hints, concise docstrings, no print() in library code (raise or
 return). Every module gets a matching `tests/test_<module>.py` using `pytest`
@@ -144,7 +144,7 @@ def parse_transcript(source: str, fmt: str = "auto") -> list[dict]:
         also '## User', 'Human:', 'AI:'). Accumulate multi-line turns until the next
         speaker marker. If no markers found, treat each non-empty line as alternating
         user/assistant starting with user.
-    Trim whitespace; drop empty turns. Never raise on malformed input — return best
+    Trim whitespace; drop empty turns. Never raise on malformed input - return best
     effort (possibly [])."""
 ```
 
@@ -180,7 +180,7 @@ class Store:
 ```
 Tables: sessions, messages, goal_states, drift_scores. Tests use a tmp_path db.
 
-## cdm/monitor.py  +  tests/test_monitor.py  (the orchestrator — ties everything together)
+## cdm/monitor.py  +  tests/test_monitor.py  (the orchestrator - ties everything together)
 
 ```python
 class DriftMonitor:
@@ -193,7 +193,7 @@ class DriftMonitor:
     def start_session(self, project_name: str, initial_goal: str,
                       constraints: list[str] | None = None) -> Session:
         """Create+persist a Session (uuid4 hex id, ISO timestamps from
-        datetime.now().isoformat() — note: scripts elsewhere can't call now(), but
+        datetime.now().isoformat() - note: scripts elsewhere can't call now(), but
         this RUNTIME module may). Persist an initial GoalState (turn_snapshot=-1)
         whose reference_embedding = embed(anchor_goal). Return the Session."""
 
@@ -233,7 +233,7 @@ cdm.drift, cdm.goal_state, cdm.corrective.
 ## app.py  (Streamlit UI, repo root)
 
 A single-file Streamlit app built ONLY on `DriftMonitor`'s public API. Requirements:
-- Sidebar: "New session" form (project name, initial goal textarea, constraints — one
+- Sidebar: "New session" form (project name, initial goal textarea, constraints - one
   per line); a selector of existing sessions (st.session_state holds the active
   DriftMonitor + session_id); threshold slider (0.30–0.95, default from config) wired
   to set_threshold; a small caption showing the active embedder name + a note when
@@ -254,7 +254,7 @@ A single-file Streamlit app built ONLY on `DriftMonitor`'s public API. Requireme
 - Must run with: `streamlit run app.py`. Never crash on empty/new session.
 
 ## Demo assets (repo root)
-- sample_transcript.json — a ~14-turn conversation that starts on a clear goal
+- sample_transcript.json - a ~14-turn conversation that starts on a clear goal
   (e.g. "design a pan-tilt EO/IR mount under 5 kg") and visibly drifts (into
   tangents like office snacks / unrelated topics) so the drift graph clearly rises.
-- run.sh — create venv, pip install -r requirements.txt, streamlit run app.py.
+- run.sh - create venv, pip install -r requirements.txt, streamlit run app.py.

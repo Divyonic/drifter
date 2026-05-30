@@ -11,7 +11,7 @@ markdown-it-py>=3.0  # render assistant replies as markdown in the chat
 #   pip install google-genai     # Gemini
 #   pip install openai           # OpenAI
 
-# --- optional: semantic (neural) drift — onnxruntime, no torch, downloads once ---
+# --- optional: semantic (neural) drift - onnxruntime, no torch, downloads once ---
 #   pip install fastembed
 
 # --- optional: the Streamlit browser app (`drifter web`) ---
