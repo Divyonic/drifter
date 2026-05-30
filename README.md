@@ -25,10 +25,13 @@ drifter
 
 `drifter` opens the native desktop app and walks you through a 3-step setup
 (welcome → connect your AI with a "Get an API key ↗" link → your goal). Replies
-stream in, drift tracks live, and the monitor view stays clean — the chart leads with a
-small, always-visible **legend** docked inside it (painted swatches that match the actual
-chart lines: Goal · Recent context · Threshold · Normal range), and a single control bar
-holds just the threshold + *Auto re-align*. The deeper explanation lives behind the "?".
+stream in and drift tracks live on a clean **card dashboard**: a **drift gauge** tile (an
+animated radial gauge with the live value, tick marks and a threshold notch), a **status**
+tile (an on-track/drifting pill, a one-line reason, a live drift **sparkline**, and a
+forecast — "crosses in ~N turns" / "stable"), and the detailed **drift chart** card below
+(with a small always-visible legend whose swatches match the actual chart lines:
+Goal · Recent context · Threshold · Normal range). A single control bar holds the
+threshold + *Auto re-align*; the deeper explanation lives behind the "?".
 
 **Appearance** lives in **Settings → Appearance**: a segmented **Follow system / Light /
 Dark** control that applies instantly and is remembered. (Default follows macOS.) The
