@@ -63,7 +63,7 @@ from PySide6.QtWidgets import (
 from cdm import claude_code as cc
 from cdm import config
 from cdm.corrective import strictness_line
-from cdm.embeddings import get_embedder
+from cdm.embeddings import fastembed_available, get_embedder
 from cdm.llm import (
     PROVIDERS,
     LLMError,
@@ -642,6 +642,10 @@ class ProviderSetup(QWidget):
 
         self.model = QComboBox()
         self.model.setEditable(True)
+        self.model.setToolTip(
+            "Aliases (opus / sonnet / haiku) always use the latest of that family.\n"
+            "Pick a pinned ID (e.g. claude-opus-4-8) to lock an exact version."
+        )
         self.refresh_btn = QPushButton("Refresh list")
         model_row = QHBoxLayout()
         model_row.setContentsMargins(0, 0, 0, 0)
@@ -737,6 +741,16 @@ class ProviderSetup(QWidget):
         self.key.setVisible(not keyless)
         self.get_key_btn.setVisible(not keyless)
         self.refresh_btn.setVisible(not keyless)
+        if keyless:
+            self.model_caption.setText(
+                "Aliases (opus / sonnet / haiku) always run the latest of that family. "
+                "Pick a pinned ID like claude-opus-4-8 to lock an exact version — or type any."
+            )
+        else:
+            self.model_caption.setText(
+                "Pick a model from the list (or type one). ‘Refresh’ / ‘Test connection’ "
+                "loads your provider's live list."
+            )
         if keyless:
             self.key.clear()
             if claude_cli_available():
@@ -1016,11 +1030,22 @@ class SettingsDialog(QDialog):
     def _sync_engine_label(self) -> None:
         pref = self._engine_pref()
         if pref in ("semantic", "fastembed"):
-            self.engine_state.setText("Current: Semantic (neural, offline after download). Most accurate.")
+            if fastembed_available():
+                self.engine_state.setText(
+                    "Current: Semantic (neural, runs offline after a one-time download). "
+                    "Most accurate — tells reworded-but-on-topic from genuinely off-topic."
+                )
+            else:
+                # Honest: selected semantic but the package isn't here, so it falls back.
+                self.engine_state.setText(
+                    "Selected: Semantic — but the ‘fastembed’ package isn’t installed, so "
+                    "Drifter is actually running on Fast. Enable semantic below to fix it."
+                )
         else:
             self.engine_state.setText(
-                "Current: Fast (pure-Python, offline, zero download). Semantic is more "
-                "accurate for reworded text. Changes apply on restart."
+                "Current: Fast (pure-Python, offline, zero download). It measures word "
+                "overlap, so reworded-but-on-topic text can look like drift. Semantic is "
+                "more accurate. Changes apply on restart."
             )
 
     def _use_fast(self) -> None:
@@ -1032,7 +1057,22 @@ class SettingsDialog(QDialog):
     def _enable_semantic(self) -> None:
         if self._dl and self._dl.isRunning():
             return
-        prog = QProgressDialog("Downloading the semantic model (one time)…", None, 0, 0, self)
+        # Pre-check the package so we can give a precise fix instead of a raw stack trace.
+        if not fastembed_available():
+            QMessageBox.information(
+                self, "Enable semantic drift",
+                "Semantic mode needs one extra package, ‘fastembed’ (a small neural "
+                "embedder — onnxruntime, no PyTorch).\n\n"
+                "Install it, then click ‘Enable semantic’ again:\n\n"
+                "    pip install fastembed\n\n"
+                "or reinstall Drifter with the semantic extra:\n\n"
+                "    pip install \"drifter[semantic]\"\n\n"
+                "Until then Drifter keeps using the Fast offline engine.",
+            )
+            return
+        prog = QProgressDialog(
+            "Downloading the semantic model (~80 MB, one time)…\nIt runs fully offline afterwards.",
+            None, 0, 0, self)
         prog.setWindowTitle("Drifter")
         prog.setWindowModality(Qt.WindowModal)
         prog.setCancelButton(None)
@@ -1045,7 +1085,16 @@ class SettingsDialog(QDialog):
     def _semantic_done(self, prog, error: Optional[str]) -> None:
         prog.close()
         if error:
-            QMessageBox.warning(self, "Drifter", f"Could not enable semantic: {error}")
+            low = error.lower()
+            if "fastembed" in low and ("install" in low or "no module" in low or "requires" in low):
+                msg = ("Semantic mode needs the ‘fastembed’ package. Install it and try "
+                       "again:\n\n    pip install fastembed")
+            else:
+                msg = ("Couldn’t download the semantic model — this is almost always a "
+                       "network/proxy issue. Check your internet connection and try again; "
+                       "it downloads once (~80 MB), then runs fully offline.\n\n"
+                       f"Details: {error}")
+            QMessageBox.warning(self, "Couldn’t enable semantic", msg)
             return
         if self.store:
             self.store.set_meta("embedder", "semantic")

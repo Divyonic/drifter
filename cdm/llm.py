@@ -45,6 +45,21 @@ class LLMError(RuntimeError):
     """Raised for any provider/SDK/credential problem (with a helpful message)."""
 
 
+# Claude models, shared by the API ("claude") and subscription/CLI ("claude-cli")
+# providers so both let you pin an exact version.
+#   - Aliases float to the latest of each family (Claude Code CLI convenience).
+#   - Pinned IDs lock a specific version (newest first). The CLI's --model and the
+#     Anthropic API both accept these explicit IDs.
+CLAUDE_ALIASES = ["opus", "sonnet", "haiku"]
+CLAUDE_MODEL_IDS = [
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",
+]
+
+
 # Provider registry. ``models`` is a curated seed of current API model IDs (as of
 # mid-2026); the desktop app can also fetch the live list from the provider via
 # :func:`list_models`, so this stays useful even as new models ship. ``key_url`` is
@@ -58,8 +73,9 @@ PROVIDERS: Dict[str, dict] = {
         "keyless": True,
         "key_url": "",
         "key_hint": "Uses your Claude Code login — run `claude` once in a terminal to sign in. No API key, no metered cost.",
-        # Claude Code aliases (robust) plus explicit model IDs.
-        "models": ["sonnet", "opus", "haiku", "claude-opus-4-8", "claude-sonnet-4-6"],
+        # Aliases (always-latest) first, then pinned versions so you can lock e.g.
+        # a specific Opus build rather than only the floating "opus" alias.
+        "models": CLAUDE_ALIASES + CLAUDE_MODEL_IDS,
     },
     "claude": {
         "label": "Claude (Anthropic)",
@@ -68,12 +84,7 @@ PROVIDERS: Dict[str, dict] = {
         "pip": "anthropic",
         "key_url": "https://console.anthropic.com/settings/keys",
         "key_hint": "Anthropic Console → Settings → API Keys",
-        "models": [
-            "claude-opus-4-8",
-            "claude-opus-4-7",
-            "claude-sonnet-4-6",
-            "claude-haiku-4-5",
-        ],
+        "models": list(CLAUDE_MODEL_IDS),
     },
     "gemini": {
         "label": "Gemini (Google)",

@@ -351,6 +351,15 @@ def get_embedder(preference: str = config.EMBEDDER_PREFERENCE) -> Embedder:
     )
 
 
+def fastembed_available() -> bool:
+    """True if the optional ``fastembed`` package can be imported (semantic mode)."""
+    try:
+        import fastembed  # type: ignore  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 def cosine_similarity(a: List[float], b: List[float]) -> float:
     """Cosine similarity between two vectors.
 
