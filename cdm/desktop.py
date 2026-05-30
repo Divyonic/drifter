@@ -179,6 +179,17 @@ QScrollBar::handle:vertical { background: @scroll@; border-radius: 4px; min-heig
 QScrollBar::add-line, QScrollBar::sub-line { height: 0; }
 QLabel#chipOk { background: @okbg@; color: @okfg@; border-radius: 11px; padding: 6px 13px; font-weight: 700; }
 QLabel#chipBad { background: @badbg@; color: @badfg@; border-radius: 11px; padding: 6px 13px; font-weight: 700; }
+QFrame#statCard { background: @panel@; border: 1px solid @line_soft@; border-radius: 14px; }
+QLabel#iconChip { background: @bg@; border: 1px solid @line_soft@; border-radius: 8px; color: @ink@; font-size: 13px; }
+QLabel#statTitle { color: @muted@; font-size: 12px; font-weight: 600; }
+QLabel#statValue { color: @ink@; font-size: 24px; font-weight: 700; }
+QLabel#statCaption { color: @muted@; font-size: 11px; }
+QLabel#statTrend { color: @muted@; font-size: 11px; font-weight: 700; }
+QLabel#statTrend[good="1"] { color: @okfg@; }
+QLabel#statTrend[good="0"] { color: @danger@; }
+QLabel#pillOk { background: @okbg@; color: @okfg@; border-radius: 9px; padding: 4px 11px; font-size: 11px; font-weight: 700; }
+QLabel#pillBad { background: @badbg@; color: @badfg@; border-radius: 9px; padding: 4px 11px; font-size: 11px; font-weight: 700; }
+QLabel#pillWarn { background: @coach_bg@; color: @coach_fg@; border-radius: 9px; padding: 4px 11px; font-size: 11px; font-weight: 700; }
 QLabel#bubbleUser { background: @ubg@; color: @ufg@; border-radius: 18px; padding: 11px 14px; }
 QLabel#bubbleAsst { background: @abg@; color: @afg@; border-radius: 18px; padding: 11px 14px; }
 QCheckBox { color: @ink@; spacing: 8px; background: transparent; }
@@ -671,6 +682,221 @@ class DriftChart(pg.PlotWidget):
         else:
             self._forecast.setData([], [])
             self._fc_text.hide()
+
+
+# --------------------------------------------------------------------------- #
+# Dashboard primitives (painter widgets): gauge, sparkline, stat card, pill
+# --------------------------------------------------------------------------- #
+def _drift_color(value: float, threshold: float) -> str:
+    """Status colour for a drift value: green on-goal, amber nearing, red over."""
+    if value >= threshold:
+        return C["danger"]
+    if threshold > 0 and value >= threshold * 0.8:
+        return C["accent"]
+    return C["okfg"]
+
+
+class DriftGauge(QWidget):
+    """An animated radial drift gauge (reference: the 'Calories' arc gauge).
+
+    Sweeps a ~250° arc over the 0–2 drift scale: a faint track, fine tick marks, a
+    coloured fill up to the (animated) current drift, a notch at the threshold, and a
+    big centre value + caption. Colour follows :func:`_drift_color`.
+    """
+
+    _START = 235.0      # degrees (Qt: 0=3 o'clock, CCW+); arc opens at the bottom
+    _SWEEP = -290.0     # clockwise
+    _MAXV = 2.0
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setMinimumSize(150, 130)
+        self._value = 0.0
+        self._threshold = 0.65
+        self._caption = "on track"
+        self._anim = QPropertyAnimation(self, b"value", self)
+        self._anim.setDuration(520)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    def _get_value(self) -> float:
+        return self._value
+
+    def _set_value(self, v: float) -> None:
+        self._value = float(v)
+        self.update()
+
+    value = Property(float, _get_value, _set_value)
+
+    def set_state(self, drift: float, threshold: float, caption: str = "") -> None:
+        self._threshold = float(threshold)
+        self._caption = caption or self._caption
+        target = max(0.0, min(self._MAXV, float(drift)))
+        self._anim.stop()
+        self._anim.setStartValue(self._value)
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def apply_theme(self) -> None:
+        self.update()
+
+    def _frac(self, v: float) -> float:
+        return max(0.0, min(1.0, v / self._MAXV))
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        w, h = self.width(), self.height()
+        side = min(w, h * 1.18)
+        pad = 16
+        rect = QRectF((w - side) / 2 + pad, (h - side) / 2 + pad + 6,
+                      side - 2 * pad, side - 2 * pad)
+        # Track.
+        track = QPen(_rgba(C["line"], 150), 9)
+        track.setCapStyle(Qt.RoundCap)
+        p.setPen(track)
+        p.drawArc(rect, int(self._START * 16), int(self._SWEEP * 16))
+        # Tick marks around the arc.
+        import math
+        cx, cy = rect.center().x(), rect.center().y()
+        r_out = rect.width() / 2 + 3
+        r_in = r_out - 6
+        p.setPen(QPen(_rgba(C["muted"], 120), 1))
+        for i in range(31):
+            a = math.radians(self._START + self._SWEEP * (i / 30.0))
+            p.drawLine(QPointF(cx + r_in * math.cos(a), cy - r_in * math.sin(a)),
+                       QPointF(cx + r_out * math.cos(a), cy - r_out * math.sin(a)))
+        # Coloured fill up to value.
+        col = QColor(_drift_color(self._value, self._threshold))
+        fill = QPen(col, 9)
+        fill.setCapStyle(Qt.RoundCap)
+        p.setPen(fill)
+        p.drawArc(rect, int(self._START * 16), int(self._SWEEP * self._frac(self._value) * 16))
+        # Threshold notch.
+        ta = math.radians(self._START + self._SWEEP * self._frac(self._threshold))
+        p.setPen(QPen(QColor(C["danger"]), 2))
+        p.drawLine(QPointF(cx + (r_in - 4) * math.cos(ta), cy - (r_in - 4) * math.sin(ta)),
+                   QPointF(cx + (r_out + 2) * math.cos(ta), cy - (r_out + 2) * math.sin(ta)))
+        # Centre value + caption.
+        p.setPen(QColor(C["ink"]))
+        f = QFont(self.font())
+        f.setPointSizeF(30)
+        f.setWeight(QFont.DemiBold)
+        p.setFont(f)
+        p.drawText(rect, int(Qt.AlignCenter), f"{self._value:.2f}")
+        p.setPen(QColor(C["muted"]))
+        fc = QFont(self.font())
+        fc.setPointSizeF(10.5)
+        p.setFont(fc)
+        cap_rect = QRectF(rect.left(), cy + 18, rect.width(), 22)
+        p.drawText(cap_rect, int(Qt.AlignHCenter | Qt.AlignTop), self._caption)
+        p.end()
+
+
+class Sparkline(QWidget):
+    """A tiny trend line of recent drift values, coloured by current state."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setMinimumHeight(28)
+        self._vals: list = []
+        self._threshold = 0.65
+        self._maxv = 2.0
+
+    def set_values(self, vals, threshold: float) -> None:
+        self._vals = [float(v) for v in (vals or [])][-40:]
+        self._threshold = float(threshold)
+        self.update()
+
+    def apply_theme(self) -> None:
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        if len(self._vals) < 2:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        w, h = self.width(), self.height()
+        pad = 3
+        n = len(self._vals)
+        mx = max(self._maxv, max(self._vals))
+        def pt(i, v):
+            x = pad + (w - 2 * pad) * (i / (n - 1))
+            y = h - pad - (h - 2 * pad) * (v / mx)
+            return QPointF(x, y)
+        col = QColor(_drift_color(self._vals[-1], self._threshold))
+        # Soft fill under the line.
+        from PySide6.QtGui import QPainterPath
+        path = QPainterPath()
+        path.moveTo(pad, h - pad)
+        for i, v in enumerate(self._vals):
+            path.lineTo(pt(i, v))
+        path.lineTo(w - pad, h - pad)
+        path.closeSubpath()
+        p.fillPath(path, _rgba(_drift_color(self._vals[-1], self._threshold), 28))
+        # Line.
+        pen = QPen(col, 1.8)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        for i in range(1, n):
+            p.drawLine(pt(i - 1, self._vals[i - 1]), pt(i, self._vals[i]))
+        # Last-point dot.
+        p.setPen(Qt.NoPen)
+        p.setBrush(col)
+        p.drawEllipse(pt(n - 1, self._vals[-1]), 2.4, 2.4)
+        p.end()
+
+
+class StatCard(QFrame):
+    """A small dashboard tile: icon chip + title, a big value, and a caption.
+
+    Reference: the metric cards (Total Revenue / Active Contracts …). An optional
+    extra widget (sparkline / gauge) can be docked under the value.
+    """
+
+    def __init__(self, icon: str, title: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("statCard")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(15, 13, 15, 13)
+        lay.setSpacing(4)
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        chip = QLabel(icon)
+        chip.setObjectName("iconChip")
+        chip.setFixedSize(26, 26)
+        chip.setAlignment(Qt.AlignCenter)
+        ttl = QLabel(title)
+        ttl.setObjectName("statTitle")
+        head.addWidget(chip)
+        head.addWidget(ttl)
+        head.addStretch(1)
+        self.trend = QLabel("")
+        self.trend.setObjectName("statTrend")
+        head.addWidget(self.trend)
+        lay.addLayout(head)
+        self.value = QLabel("—")
+        self.value.setObjectName("statValue")
+        lay.addWidget(self.value)
+        self.caption = QLabel("")
+        self.caption.setObjectName("statCaption")
+        self.caption.setWordWrap(True)
+        lay.addWidget(self.caption)
+        self._extra_slot = lay
+
+    def set_value(self, text: str) -> None:
+        self.value.setText(text)
+
+    def set_caption(self, text: str) -> None:
+        self.caption.setText(text)
+
+    def set_trend(self, text: str, good: bool = True) -> None:
+        self.trend.setText(text)
+        self.trend.setProperty("good", "1" if good else "0")
+        self.trend.style().unpolish(self.trend)
+        self.trend.style().polish(self.trend)
+
+    def add_extra(self, widget: QWidget) -> None:
+        self._extra_slot.addWidget(widget)
 
 
 # --------------------------------------------------------------------------- #
