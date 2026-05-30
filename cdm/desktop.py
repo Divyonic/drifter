@@ -540,6 +540,8 @@ class DriftChart(pg.PlotWidget):
     # Show per-point markers only for short conversations (clutter otherwise).
     _MARKER_LIMIT = 30
 
+    pointClicked = Signal(int)  # emits the nearest turn index when the plot is clicked
+
     def __init__(self) -> None:
         super().__init__()
         self.setBackground(C["bg"])
@@ -610,6 +612,21 @@ class DriftChart(pg.PlotWidget):
         self._roles: list = []
         self._texts: list = []
         self.scene().sigMouseMoved.connect(self._on_mouse_moved)
+        self.scene().sigMouseClicked.connect(self._on_mouse_clicked)
+
+    def _on_mouse_clicked(self, event) -> None:
+        """Click a point → emit its turn so the chat can scroll to that message."""
+        if not self._turns:
+            return
+        try:
+            pos = event.scenePos()
+            if not self.sceneBoundingRect().contains(pos):
+                return
+            x = self.getViewBox().mapSceneToView(pos).x()
+        except Exception:
+            return
+        idx = min(range(len(self._turns)), key=lambda i: abs(self._turns[i] - x))
+        self.pointClicked.emit(int(self._turns[idx]))
 
     def _on_mouse_moved(self, pos) -> None:
         if not self._turns or not self.sceneBoundingRect().contains(pos):
@@ -1952,22 +1969,19 @@ class MonitorPage(QWidget):
         outer.addWidget(self.coach)
         outer.addWidget(_hairline())
 
-        split = QSplitter(Qt.Horizontal)
-        split.setHandleWidth(10)
-        split.setChildrenCollapsible(False)
-        split.addWidget(self._build_chat_panel())
-        split.addWidget(self._build_drift_panel())
-        # Proportional resize: both panes grow/shrink with the window instead of one
-        # pane eating all the extra space.
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 1)
-        split.setSizes([600, 560])
-        outer.addWidget(split, 1)
+        # Hero-chart layout: chat (left) · big drift chart (centre) · a slim rail of
+        # compact cards (right) — fills the width instead of leaving a gulf.
+        body = QHBoxLayout()
+        body.setSpacing(14)
+        body.addWidget(self._build_chat_panel(), 3)     # chat
+        body.addWidget(self._build_chart_center(), 6)   # hero chart + threshold + corrective
+        body.addWidget(self._build_rail())              # slim card rail (fixed width)
+        outer.addLayout(body, 1)
         self._sync_provider_label()
 
     def _build_chat_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(300)
+        panel.setMinimumWidth(260)
         lay = QVBoxLayout(panel)
         lay.setContentsMargins(0, 0, 8, 0)
         lay.setSpacing(10)
@@ -2019,15 +2033,14 @@ class MonitorPage(QWidget):
             self.status.setText("● Monitoring your Claude Code terminal — chat there; this graph updates live.")
         return panel
 
-    def _build_drift_panel(self) -> QWidget:
+    def _build_chart_center(self) -> QWidget:
+        """The hero column: the big drift chart, threshold toolbar, and corrective card."""
         panel = QWidget()
-        panel.setMinimumWidth(380)  # holds the cards column + the chart side by side
+        panel.setMinimumWidth(360)
         lay = QVBoxLayout(panel)
-        lay.setContentsMargins(8, 0, 0, 0)
+        lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(12)
 
-        # The chart sits alone (gets full height); the Drift + Status cards stack in a
-        # narrow column beside it, so nothing squeezes the graph.
         chart_card = QFrame()
         chart_card.setObjectName("card")
         cc = QVBoxLayout(chart_card)
@@ -2036,36 +2049,25 @@ class MonitorPage(QWidget):
         chead = QHBoxLayout()
         ctitle = QLabel("Drift over turns")
         ctitle.setObjectName("statTitle")
+        chint = QLabel("· click a point to jump to that message")
+        chint.setObjectName("muted")
         reset_btn = QPushButton("⤢ Reset view")
         reset_btn.setObjectName("link")
         reset_btn.setToolTip("Reset zoom · scroll to zoom, drag to pan, hover for details")
         reset_btn.clicked.connect(lambda: self.chart.reset_view())
         chead.addWidget(ctitle)
+        chead.addWidget(chint)
         chead.addStretch(1)
         chead.addWidget(reset_btn)
         cc.addLayout(chead)
         self.chart = DriftChart()
-        self.chart.setMinimumHeight(120)  # low floor so the card never overflows
+        self.chart.setMinimumHeight(160)  # the hero — gets the height
+        self.chart.pointClicked.connect(self._jump_to_turn)  # click-to-jump
         cc.addWidget(self.chart, 1)       # fills the card; legend stays pinned below it
         cc.addWidget(_hairline())
         cc.addWidget(self._build_legend_strip())  # small, always-visible key inside the card
         _shadow(chart_card)
-
-        cards_col = QWidget()
-        ccv = QVBoxLayout(cards_col)
-        ccv.setContentsMargins(0, 0, 0, 0)
-        ccv.setSpacing(12)
-        ccv.addWidget(self._build_gauge_card())
-        ccv.addWidget(self._build_status_card())
-        ccv.addStretch(1)
-        cards_col.setMinimumWidth(172)
-        cards_col.setMaximumWidth(232)
-
-        top = QHBoxLayout()
-        top.setSpacing(12)
-        top.addWidget(cards_col, 0)
-        top.addWidget(chart_card, 1)
-        lay.addLayout(top, 1)
+        lay.addWidget(chart_card, 1)
 
         # One tidy control bar: threshold + auto re-align live here. Everything
         # explanatory lives in the legend (above) and the "?" help dialog.
@@ -2198,6 +2200,71 @@ class MonitorPage(QWidget):
         _shadow(scard, blur=22, dy=5, alpha=18)
         return scard
 
+    def _build_subgoals_card(self) -> QFrame:
+        """Focus + sub-goals breakdown (from Smart mode, with a goal-state fallback)."""
+        card = QFrame()
+        card.setObjectName("statCard")
+        v = QVBoxLayout(card)
+        v.setContentsMargins(14, 11, 14, 12)
+        v.setSpacing(7)
+        h = QHBoxLayout()
+        h.setSpacing(8)
+        ic = QLabel("⊙")
+        ic.setObjectName("iconChip")
+        ic.setFixedSize(26, 26)
+        ic.setAlignment(Qt.AlignCenter)
+        t = QLabel("Focus & sub-goals")
+        t.setObjectName("statTitle")
+        h.addWidget(ic)
+        h.addWidget(t)
+        h.addStretch(1)
+        v.addLayout(h)
+        self.subgoals_label = QLabel("Sub-goals appear here as Smart mode reads the chat.")
+        self.subgoals_label.setObjectName("statCaption")
+        self.subgoals_label.setWordWrap(True)
+        self.subgoals_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        v.addWidget(self.subgoals_label, 1)
+        _shadow(card, blur=22, dy=5, alpha=18)
+        return card
+
+    def _build_rail(self) -> QWidget:
+        """The slim right rail of compact cards beside the hero chart."""
+        rail = QWidget()
+        rail.setFixedWidth(238)
+        rv = QVBoxLayout(rail)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.setSpacing(12)
+        rv.addWidget(self._build_gauge_card())
+        rv.addWidget(self._build_status_card())
+        rv.addWidget(self._build_subgoals_card(), 1)  # stretches to fill the rail
+        return rail
+
+    def _update_subgoals(self) -> None:
+        """Fill the focus/sub-goals card from the Smart verdict, else the goal state."""
+        lines: List[str] = []
+        v = self.smart_verdict
+        if v:
+            focus = (v.get("current_focus") or "").strip()
+            if focus:
+                lines.append(f"Now · {focus}")
+            lines += [f"• {s}" for s in (v.get("sub_goals") or [])[:6]]
+        if not lines:
+            gs = self.monitor.latest_goal_state(self.session_id)
+            raw = (gs.raw if gs else {}) or {}
+            focus = (raw.get("current_focus") or "").strip()
+            if focus:
+                lines.append(f"Now · {focus}")
+            lines += [f"• {c}" for c in (raw.get("constraints") or [])[:5]]
+        self.subgoals_label.setText(
+            "\n".join(lines) if lines else "Sub-goals appear here as Smart mode reads the chat."
+        )
+
+    def _jump_to_turn(self, turn: int) -> None:
+        """Scroll the chat to the message for ``turn`` (chart point clicked)."""
+        if 0 <= turn < len(self._bubbles):
+            self.chat_scroll.ensureWidgetVisible(self._bubbles[turn], 0, 30)
+            self.status.setText(f"Jumped to turn {turn}.")
+
     def _set_status(self, kind: str, pill_text: str, reason: str) -> None:
         """Set the status tile's pill (pillOk/pillBad/pillWarn) + reason line."""
         self.status_pill.setObjectName(kind)
@@ -2249,7 +2316,7 @@ class MonitorPage(QWidget):
         bubble.setObjectName("bubbleUser" if is_user else "bubbleAsst")
         bubble.setWordWrap(True)
         bubble.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        bubble.setMaximumWidth(470)
+        bubble.setMaximumWidth(620)  # wider so messages fill the chat column
         if rich:
             bubble.setTextFormat(Qt.RichText)
             bubble.setText(_md_to_html(text))
@@ -2577,6 +2644,7 @@ class MonitorPage(QWidget):
         self.smart_verdict = verdict
         self._update_smart_ui()
         self._update_coach()
+        self._update_subgoals()
 
     def _on_smart_failed(self, _msg: str) -> None:
         if self._dead:
@@ -2650,6 +2718,7 @@ class MonitorPage(QWidget):
             self._set_status("pillOk", "on track", "Monitoring — keep chatting.")
             self.corr_card.setVisible(False)
         self._update_smart_ui()  # smart verdict overrides the offline status when present
+        self._update_subgoals()
 
     def _set_forecast_label(self, ts: dict, high: bool) -> None:
         """Forecast tile copy from the self-calibrating analytics in ``ts``."""
@@ -2750,8 +2819,8 @@ class AppShell(QMainWindow):
         self.monitor_page: Optional[MonitorPage] = None
         self._cur_page = PAGE_SESSIONS
         self.setWindowTitle("Drifter")
-        self.resize(1180, 768)
-        self.setMinimumSize(980, 580)  # 232 rail + ~750 work area never clips
+        self.resize(1280, 800)
+        self.setMinimumSize(1080, 600)  # sidebar + chat + hero chart + rail all fit
 
         central = QWidget()
         self.setCentralWidget(central)
