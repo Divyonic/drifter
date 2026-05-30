@@ -21,7 +21,9 @@ os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 
 import pyqtgraph as pg
 from PySide6.QtCore import (
+    QEasingCurve,
     QEventLoop,
+    QPoint,
     QPointF,
     QPropertyAnimation,
     QRectF,
@@ -29,6 +31,7 @@ from PySide6.QtCore import (
     QThread,
     QTimer,
     QUrl,
+    Property,
     Signal,
 )
 from PySide6.QtGui import (
@@ -160,7 +163,9 @@ QPushButton#link:hover { color: @accent_hover@; }
 QPushButton#seg { background: @panel@; color: @muted@; border: 1px solid @line_soft@; border-radius: 9px; padding: 7px 16px; font-weight: 600; }
 QPushButton#seg:hover { color: @ink@; }
 QPushButton#segOn { background: @bg@; color: @ink@; border: 1px solid @accent@; border-radius: 9px; padding: 7px 16px; font-weight: 700; }
-QLineEdit, QPlainTextEdit, QComboBox, QDoubleSpinBox { background: @input@; border: 1px solid @line@; border-radius: 10px; padding: 9px 11px; selection-background-color: @sel@; selection-color: @ink@; }
+QLineEdit, QPlainTextEdit, QComboBox, QDoubleSpinBox { background: @input@; color: @ink@; border: 1px solid @line@; border-radius: 10px; padding: 7px 11px; min-height: 22px; selection-background-color: @sel@; selection-color: @ink@; }
+QComboBox:editable, QComboBox QLineEdit { background: @input@; color: @ink@; border: none; padding: 0; }
+QComboBox::item { min-height: 26px; }
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border: 1px solid @accent@; }
 QComboBox::drop-down { border: none; width: 22px; }
 QComboBox QAbstractItemView { background: @bg@; border: 1px solid @line@; border-radius: 10px; selection-background-color: @coach_bg@; selection-color: @ink@; outline: none; padding: 4px; }
