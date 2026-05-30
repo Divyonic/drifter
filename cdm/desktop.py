@@ -2741,28 +2741,39 @@ class MonitorPage(QWidget):
 class Sidebar(QFrame):
     """The persistent left navigation rail (brand · nav · New · provider · theme)."""
 
+    _WIDE = 232
+    _NARROW = 66
+    # nav glyphs + labels (collapsed shows the glyph only).
+    _NAV = ((PAGE_MONITOR, "◎", "Monitor"),
+            (PAGE_SESSIONS, "☰", "Sessions"),
+            (PAGE_SETTINGS, "⚙", "Settings"))
+
     def __init__(self, shell) -> None:
         super().__init__()
         self.shell = shell
+        self._collapsed = False
         self.setObjectName("sidebar")
-        self.setFixedWidth(232)  # fixed in code so _UI_SCALE never reflows the rail
+        self.setFixedWidth(self._WIDE)  # fixed in code so _UI_SCALE never reflows the rail
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 18, 16, 16)
+        lay.setContentsMargins(12, 16, 12, 16)
         lay.setSpacing(6)
 
         brand = QHBoxLayout()
-        brand.addWidget(logo_label(22))
+        self.logo = logo_label(22)
+        self.toggle_btn = QPushButton("‹")
+        self.toggle_btn.setObjectName("iconBtn")
+        self.toggle_btn.setFixedSize(30, 30)
+        self.toggle_btn.setToolTip("Collapse the sidebar")
+        self.toggle_btn.clicked.connect(lambda: self.shell.toggle_sidebar())
+        brand.addWidget(self.logo)
         brand.addStretch(1)
+        brand.addWidget(self.toggle_btn)
         lay.addLayout(brand)
         lay.addSpacing(14)
 
         self._nav = {}
-        for page, label in (
-            (PAGE_MONITOR, "◎   Monitor"),
-            (PAGE_SESSIONS, "☰   Sessions"),
-            (PAGE_SETTINGS, "⚙   Settings"),
-        ):
-            btn = QPushButton(label)
+        for page, glyph, label in self._NAV:
+            btn = QPushButton(f"{glyph}   {label}")
             btn.setObjectName("navItem")
             btn.setCheckable(True)
             btn.setAutoExclusive(True)
@@ -2772,10 +2783,10 @@ class Sidebar(QFrame):
 
         lay.addStretch(1)
 
-        new_btn = QPushButton("+  New session")
-        new_btn.setObjectName("primary")
-        new_btn.clicked.connect(lambda: self.shell.new_session())
-        lay.addWidget(new_btn)
+        self.new_btn = QPushButton("+  New session")
+        self.new_btn.setObjectName("primary")
+        self.new_btn.clicked.connect(lambda: self.shell.new_session())
+        lay.addWidget(self.new_btn)
 
         self.provider_chip = QPushButton("")
         self.provider_chip.setObjectName("providerChip")
@@ -2783,9 +2794,12 @@ class Sidebar(QFrame):
         self.provider_chip.clicked.connect(lambda: self.shell.navigate(PAGE_SETTINGS))
         lay.addWidget(self.provider_chip)
 
-        lay.addWidget(_hairline())
+        self._theme_hairline = _hairline()
+        lay.addWidget(self._theme_hairline)
         self._theme_choice = "auto"
-        seg = QHBoxLayout()
+        self._theme_row = QWidget()
+        seg = QHBoxLayout(self._theme_row)
+        seg.setContentsMargins(0, 0, 0, 0)
         seg.setSpacing(6)
         self._theme_btns = {}
         for key, label in (("auto", "Auto"), ("light", "Light"), ("dark", "Dark")):
@@ -2793,7 +2807,26 @@ class Sidebar(QFrame):
             btn.clicked.connect(lambda _=False, k=key: self.shell.set_theme(k))
             self._theme_btns[key] = btn
             seg.addWidget(btn)
-        lay.addLayout(seg)
+        lay.addWidget(self._theme_row)
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        """Collapse to a thin icon rail, or expand to the full labelled sidebar."""
+        self._collapsed = collapsed
+        self.setFixedWidth(self._NARROW if collapsed else self._WIDE)
+        m = 8 if collapsed else 12
+        self.layout().setContentsMargins(m, 16, m, 16)
+        for page, glyph, label in self._NAV:
+            btn = self._nav[page]
+            btn.setText(glyph if collapsed else f"{glyph}   {label}")
+            btn.setToolTip(label if collapsed else "")
+        self.new_btn.setText("+" if collapsed else "+  New session")
+        self.new_btn.setToolTip("New session" if collapsed else "")
+        self.logo.setVisible(not collapsed)
+        self.provider_chip.setVisible(not collapsed)
+        self._theme_hairline.setVisible(not collapsed)
+        self._theme_row.setVisible(not collapsed)
+        self.toggle_btn.setText("›" if collapsed else "‹")
+        self.toggle_btn.setToolTip("Expand the sidebar" if collapsed else "Collapse the sidebar")
 
     def set_active(self, page: int) -> None:
         btn = self._nav.get(page)
@@ -2843,6 +2876,14 @@ class AppShell(QMainWindow):
 
         self.sidebar.sync_theme(monitor.store.get_meta("theme") or "auto")
         self._sync_provider_chip()
+        if monitor.store.get_meta("sidebar_collapsed") == "1":
+            self.sidebar.set_collapsed(True)
+
+    def toggle_sidebar(self) -> None:
+        collapsed = not self.sidebar._collapsed
+        self.sidebar.set_collapsed(collapsed)
+        self.monitor.store.set_meta("sidebar_collapsed", "1" if collapsed else "0")
+        self._apply_scale()  # content pane width changed → re-evaluate the UI scale
 
     # -- navigation ---------------------------------------------------------- #
     def navigate(self, page: int) -> None:
