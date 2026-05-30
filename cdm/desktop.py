@@ -2025,27 +2025,27 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(8, 0, 0, 0)
         lay.setSpacing(12)
 
-        top = QHBoxLayout()
-        self.chip = QLabel("on track")
-        self.chip.setObjectName("chipOk")
-        self.metric_label = QLabel("drift 0.000")
-        self.metric_label.setObjectName("muted")
-        reset_btn = QPushButton("⤢ Reset")
-        reset_btn.setObjectName("link")
-        reset_btn.setToolTip("Reset zoom · scroll to zoom, drag to pan, hover for details")
-        reset_btn.clicked.connect(lambda: self.chart.reset_view())
-        top.addWidget(self.chip)
-        top.addStretch(1)
-        top.addWidget(self.metric_label)
-        top.addWidget(reset_btn)
-        lay.addLayout(top)
+        # Dashboard metric strip: a drift gauge tile + a status/forecast tile.
+        lay.addWidget(self._build_metric_strip())
 
         chart_card = QFrame()
         chart_card.setObjectName("card")
         cc = QVBoxLayout(chart_card)
-        cc.setContentsMargins(12, 12, 12, 12)
+        cc.setContentsMargins(14, 12, 14, 12)
+        cc.setSpacing(8)
+        chead = QHBoxLayout()
+        ctitle = QLabel("Drift over turns")
+        ctitle.setObjectName("statTitle")
+        reset_btn = QPushButton("⤢ Reset view")
+        reset_btn.setObjectName("link")
+        reset_btn.setToolTip("Reset zoom · scroll to zoom, drag to pan, hover for details")
+        reset_btn.clicked.connect(lambda: self.chart.reset_view())
+        chead.addWidget(ctitle)
+        chead.addStretch(1)
+        chead.addWidget(reset_btn)
+        cc.addLayout(chead)
         self.chart = DriftChart()
-        self.chart.setMinimumHeight(200)  # shrinks with the window, stays legible
+        self.chart.setMinimumHeight(190)  # shrinks with the window, stays legible
         cc.addWidget(self.chart)
         cc.addWidget(_hairline())
         cc.addWidget(self._build_legend_strip())  # small, always-visible key inside the card
@@ -2118,6 +2118,91 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.corr_card)
         self.corr_card.setVisible(False)
         return panel
+
+    def _build_metric_strip(self) -> QWidget:
+        """A dashboard metric strip: a drift gauge tile + a status/forecast tile."""
+        strip = QWidget()
+        row = QHBoxLayout(strip)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(12)
+
+        # -- gauge tile -- #
+        gcard = QFrame()
+        gcard.setObjectName("statCard")
+        gv = QVBoxLayout(gcard)
+        gv.setContentsMargins(12, 11, 12, 8)
+        gv.setSpacing(2)
+        gh = QHBoxLayout()
+        gh.setSpacing(8)
+        gi = QLabel("◎")
+        gi.setObjectName("iconChip")
+        gi.setFixedSize(26, 26)
+        gi.setAlignment(Qt.AlignCenter)
+        gt = QLabel("Drift")
+        gt.setObjectName("statTitle")
+        self.gauge_turns = QLabel("0 turns")
+        self.gauge_turns.setObjectName("statCaption")
+        gh.addWidget(gi)
+        gh.addWidget(gt)
+        gh.addStretch(1)
+        gh.addWidget(self.gauge_turns)
+        gv.addLayout(gh)
+        self.gauge = DriftGauge()
+        gv.addWidget(self.gauge, 1)
+        _shadow(gcard, blur=22, dy=5, alpha=18)
+        row.addWidget(gcard, 3)
+
+        # -- status / forecast tile -- #
+        scard = QFrame()
+        scard.setObjectName("statCard")
+        sv = QVBoxLayout(scard)
+        sv.setContentsMargins(14, 11, 14, 12)
+        sv.setSpacing(7)
+        sh = QHBoxLayout()
+        sh.setSpacing(8)
+        si = QLabel("◉")
+        si.setObjectName("iconChip")
+        si.setFixedSize(26, 26)
+        si.setAlignment(Qt.AlignCenter)
+        st = QLabel("Status")
+        st.setObjectName("statTitle")
+        self.status_pill = QLabel("on track")
+        self.status_pill.setObjectName("pillOk")
+        sh.addWidget(si)
+        sh.addWidget(st)
+        sh.addStretch(1)
+        sh.addWidget(self.status_pill)
+        sv.addLayout(sh)
+        self.status_reason = QLabel("Monitoring — keep chatting.")
+        self.status_reason.setObjectName("statCaption")
+        self.status_reason.setWordWrap(True)
+        sv.addWidget(self.status_reason)
+        self.spark = Sparkline()
+        self.spark.setFixedHeight(32)
+        sv.addWidget(self.spark)
+        sv.addWidget(_hairline())
+        self.fc_label = QLabel("Forecast: stable")
+        self.fc_label.setObjectName("statCaption")
+        self.fc_label.setWordWrap(True)
+        sv.addWidget(self.fc_label)
+        _shadow(scard, blur=22, dy=5, alpha=18)
+        row.addWidget(scard, 4)
+        return strip
+
+    def _set_status(self, kind: str, pill_text: str, reason: str) -> None:
+        """Set the status tile's pill (pillOk/pillBad/pillWarn) + reason line."""
+        self.status_pill.setObjectName(kind)
+        self.status_pill.setText(pill_text)
+        self.status_pill.style().unpolish(self.status_pill)
+        self.status_pill.style().polish(self.status_pill)
+        self.status_reason.setText(reason)
+
+    def _restyle_glance(self) -> None:
+        """Repaint the gauge + sparkline for the active palette (theme change)."""
+        if hasattr(self, "gauge"):
+            self.gauge.apply_theme()
+        if hasattr(self, "spark"):
+            self.spark.apply_theme()
 
     # -- chat bubbles -------------------------------------------------------- #
     def _add_bubble(self, role: str, text: str, rich: bool = False) -> QLabel:
@@ -2236,9 +2321,10 @@ class MainWindow(QMainWindow):
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self.provider, self.model, self.monitor.store, self)
         accepted = dlg.exec() == QDialog.Accepted
-        # Appearance can change live inside the dialog — re-tint the chart + legend either way.
+        # Appearance can change live inside the dialog — re-tint chart + legend + tiles either way.
         self.chart.apply_theme()
         self._restyle_legend()
+        self._restyle_glance()
         if accepted:
             provider, model, _ = dlg.result_values()
             self.provider = provider
@@ -2482,17 +2568,17 @@ class MainWindow(QMainWindow):
         self._last_smart_n = -99
 
     def _update_smart_ui(self) -> None:
-        """Smart verdict (when present) is authoritative over the offline cosine chip.
+        """Smart verdict (when present) is authoritative over the offline status tile.
 
-        The verdict's reason is surfaced in the coach bar (see ``_update_coach``);
-        here it only drives the status chip and the corrective card.
+        Drives the status pill + reason and the corrective card. The verdict reason is
+        also surfaced in the coach bar (see ``_update_coach``).
         """
         v = self.smart_verdict
         if not v:
             return
+        reason = v.get("reason", "")
         if v["status"] == "drifting":
-            self.chip.setText("DRIFTING")
-            self.chip.setObjectName("chipBad")
+            self._set_status("pillBad", "DRIFTING", reason or "Off your goal.")
             base = v.get("corrective")
             if base:  # LLM-written corrective — add the threshold-tuned tightness line
                 corr = base + "\n\n" + strictness_line(self.monitor.threshold)
@@ -2501,13 +2587,13 @@ class MainWindow(QMainWindow):
             self.corr_text.setPlainText(corr)
             self.corr_card.setVisible(True)
         else:
-            nice = {"on_track": "on track", "sub_task": "on track · sub-task",
-                    "evolved": "on track · evolved"}.get(v["status"], "on track")
-            self.chip.setText(nice)
-            self.chip.setObjectName("chipOk")
+            pill, label = {
+                "on_track": ("pillOk", "on track"),
+                "sub_task": ("pillWarn", "sub-task"),
+                "evolved": ("pillWarn", "goal evolved"),
+            }.get(v["status"], ("pillOk", "on track"))
+            self._set_status(pill, label, reason or "On your goal.")
             self.corr_card.setVisible(False)
-        self.chip.style().unpolish(self.chip)
-        self.chip.style().polish(self.chip)
 
     def _tick(self) -> None:
         if self.tail:
@@ -2529,24 +2615,36 @@ class MainWindow(QMainWindow):
             return
         turns = ts.get("turns") or []
         anchor = ts.get("drift_from_anchor") or []
-        reference = ts.get("drift_from_reference") or []
         threshold = float(ts.get("threshold", self.monitor.threshold))
         self.chart.update(ts)
         last = anchor[-1] if anchor else 0.0
         high = bool(turns) and (last > threshold)
-        self.metric_label.setText(f"drift {last:.3f} · {len(turns)} turns")
+
+        # Drive the dashboard metric tiles.
+        self.gauge.set_state(last, threshold, "DRIFTING" if high else "on track")
+        self.gauge_turns.setText(f"{len(turns)} turn{'' if len(turns) == 1 else 's'}")
+        self.spark.set_values(anchor, threshold)
+        self._set_forecast_label(ts, high)
         if high:
-            self.chip.setText("DRIFTING")
-            self.chip.setObjectName("chipBad")
+            self._set_status("pillBad", "DRIFTING", "Off your goal — review the corrective.")
             self.corr_text.setPlainText(self.monitor.current_corrective_prompt(self.session_id))
             self.corr_card.setVisible(True)
         else:
-            self.chip.setText("on track")
-            self.chip.setObjectName("chipOk")
+            self._set_status("pillOk", "on track", "Monitoring — keep chatting.")
             self.corr_card.setVisible(False)
-        self.chip.style().unpolish(self.chip)
-        self.chip.style().polish(self.chip)
-        self._update_smart_ui()  # smart verdict overrides the offline chip when present
+        self._update_smart_ui()  # smart verdict overrides the offline status when present
+
+    def _set_forecast_label(self, ts: dict, high: bool) -> None:
+        """Forecast tile copy from the self-calibrating analytics in ``ts``."""
+        if high:
+            self.fc_label.setText("⚠ Off-track now")
+            return
+        will = ts.get("forecast_will_cross")
+        fc = ts.get("forecast_turns")
+        if will and fc:
+            self.fc_label.setText(f"↗ Forecast: crosses in ~{int(fc)} turns")
+        else:
+            self.fc_label.setText("Forecast: stable")
 
     def closeEvent(self, event) -> None:  # noqa: N802
         try:
@@ -2603,6 +2701,7 @@ def main() -> int:
                 try:
                     w.chart.apply_theme()
                     w._restyle_legend()
+                    w._restyle_glance()
                 except Exception:
                     pass
 
