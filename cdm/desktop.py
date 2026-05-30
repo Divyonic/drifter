@@ -1973,8 +1973,8 @@ class MonitorPage(QWidget):
         # compact cards (right) — fills the width instead of leaving a gulf.
         body = QHBoxLayout()
         body.setSpacing(14)
-        body.addWidget(self._build_chat_panel(), 3)     # chat
-        body.addWidget(self._build_chart_center(), 6)   # hero chart + threshold + corrective
+        body.addWidget(self._build_chat_panel(), 5)     # chat (full message width visible)
+        body.addWidget(self._build_chart_center(), 5)   # chart + threshold + corrective
         body.addWidget(self._build_rail())              # slim card rail (fixed width)
         outer.addLayout(body, 1)
         self._sync_provider_label()
@@ -1988,6 +1988,7 @@ class MonitorPage(QWidget):
 
         self.chat_scroll = QScrollArea()
         self.chat_scroll.setWidgetResizable(True)
+        self.chat_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # never scroll sideways
         self.chat_inner = QWidget()
         self.chat_layout = QVBoxLayout(self.chat_inner)
         self.chat_layout.setContentsMargins(2, 2, 8, 2)
@@ -2049,8 +2050,9 @@ class MonitorPage(QWidget):
         chead = QHBoxLayout()
         ctitle = QLabel("Drift over turns")
         ctitle.setObjectName("statTitle")
-        chint = QLabel("· click a point to jump to that message")
+        chint = QLabel("· click to jump")
         chint.setObjectName("muted")
+        chint.setToolTip("Click a point on the chart to scroll the chat to that message")
         reset_btn = QPushButton("⤢ Reset view")
         reset_btn.setObjectName("link")
         reset_btn.setToolTip("Reset zoom · scroll to zoom, drag to pan, hover for details")
@@ -2316,7 +2318,7 @@ class MonitorPage(QWidget):
         bubble.setObjectName("bubbleUser" if is_user else "bubbleAsst")
         bubble.setWordWrap(True)
         bubble.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        bubble.setMaximumWidth(620)  # wider so messages fill the chat column
+        bubble.setMaximumWidth(440)  # caps wide bubbles; wraps to the column otherwise
         if rich:
             bubble.setTextFormat(Qt.RichText)
             bubble.setText(_md_to_html(text))
