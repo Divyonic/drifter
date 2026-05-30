@@ -129,7 +129,7 @@ def set_dark(dark: bool) -> None:
 
 
 _QSS = """
-* { font-family: "-apple-system", "SF Pro Text", "SF Pro Display", "Helvetica Neue", sans-serif; }
+* { font-family: "SF Mono", "JetBrains Mono", "Menlo", "Cascadia Code", "Consolas", monospace; }
 QWidget { background: @bg@; color: @ink@; font-size: 13px; }
 QMainWindow, QDialog { background: @bg@; }
 QLabel#h1 { font-size: 26px; font-weight: 600; }
@@ -139,8 +139,6 @@ QLabel#muted { color: @muted@; }
 QLabel#anchor { color: @muted@; font-size: 12px; }
 QLabel#providerChip { color: @muted@; font-size: 12px; font-weight: 600; background: @panel@; border: 1px solid @line_soft@; border-radius: 11px; padding: 5px 11px; }
 QFrame#vsep { background: @line_soft@; border: none; }
-QPushButton#ghost { background: transparent; border: 1px solid @line_soft@; border-radius: 9px; padding: 7px 12px; font-weight: 600; }
-QPushButton#ghost:hover { background: @hover@; }
 QPushButton#iconBtn { background: transparent; border: none; border-radius: 9px; font-size: 17px; padding: 0; }
 QPushButton#iconBtn:hover { background: @hover@; }
 QLabel#coach { background: @coach_bg@; color: @coach_fg@; border-radius: 12px; padding: 11px 15px; font-weight: 600; }
@@ -152,20 +150,25 @@ QFrame#legendStrip { background: transparent; border: none; }
 QLabel#legendSwatch { background: transparent; border: none; padding: 0; }
 QLabel#legendKey { color: @muted@; font-size: 12px; background: transparent; border: none; }
 QFrame#hairline { background: @line@; max-height: 1px; min-height: 1px; border: none; }
-QPushButton { background: @bg@; color: @ink@; border: 1px solid @line@; border-radius: 10px; padding: 9px 16px; font-weight: 600; }
+/* Single-line controls: NO vertical padding (it makes macOS clip the text); height
+   comes from min-height so the text always has full room and centres vertically. */
+QPushButton { background: @bg@; color: @ink@; border: 1px solid @line@; border-radius: 10px; padding: 0 16px; min-height: 34px; font-weight: 600; }
 QPushButton:hover { background: @hover@; }
 QPushButton:disabled { color: @muted@; border-color: @line_soft@; }
 QPushButton#primary { background: @accent@; color: #FFFFFF; border: none; }
 QPushButton#primary:hover { background: @accent_hover@; }
 QPushButton#primary:disabled { background: @line@; }
-QPushButton#link { background: transparent; border: none; color: @accent@; padding: 9px 6px; font-weight: 600; }
+QPushButton#link { background: transparent; border: none; color: @accent@; padding: 0 6px; min-height: 30px; font-weight: 600; }
 QPushButton#link:hover { color: @accent_hover@; }
-QPushButton#seg { background: @panel@; color: @muted@; border: 1px solid @line_soft@; border-radius: 9px; padding: 7px 16px; font-weight: 600; }
+QPushButton#ghost { background: transparent; border: 1px solid @line_soft@; border-radius: 9px; padding: 0 12px; min-height: 32px; font-weight: 600; }
+QPushButton#ghost:hover { background: @hover@; }
+QPushButton#seg { background: @panel@; color: @muted@; border: 1px solid @line_soft@; border-radius: 9px; padding: 0 16px; min-height: 32px; font-weight: 600; }
 QPushButton#seg:hover { color: @ink@; }
-QPushButton#segOn { background: @bg@; color: @ink@; border: 1px solid @accent@; border-radius: 9px; padding: 7px 16px; font-weight: 700; }
-QLineEdit, QPlainTextEdit, QComboBox, QDoubleSpinBox { background: @input@; color: @ink@; border: 1px solid @line@; border-radius: 10px; padding: 7px 11px; min-height: 22px; selection-background-color: @sel@; selection-color: @ink@; }
-QComboBox:editable, QComboBox QLineEdit { background: @input@; color: @ink@; border: none; padding: 0; }
-QComboBox::item { min-height: 26px; }
+QPushButton#segOn { background: @bg@; color: @ink@; border: 1px solid @accent@; border-radius: 9px; padding: 0 16px; min-height: 32px; font-weight: 700; }
+QLineEdit, QComboBox, QDoubleSpinBox { background: @input@; color: @ink@; border: 1px solid @line@; border-radius: 10px; padding: 0 11px; min-height: 34px; selection-background-color: @sel@; selection-color: @ink@; }
+QPlainTextEdit { background: @input@; color: @ink@; border: 1px solid @line@; border-radius: 10px; padding: 8px 11px; selection-background-color: @sel@; selection-color: @ink@; }
+QComboBox QLineEdit { background: transparent; color: @ink@; border: none; padding: 0; min-height: 0; }
+QComboBox::item { min-height: 28px; }
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QDoubleSpinBox:focus { border: 1px solid @accent@; }
 QComboBox::drop-down { border: none; width: 22px; }
 QComboBox QAbstractItemView { background: @bg@; border: 1px solid @line@; border-radius: 10px; selection-background-color: @coach_bg@; selection-color: @ink@; outline: none; padding: 4px; }
@@ -1306,8 +1309,16 @@ class SettingsDialog(QDialog):
         self.store = store
         self._dl: Optional[ModelDownloadThread] = None
         self.setWindowTitle("Settings")
-        self.setMinimumWidth(500)
-        lay = QVBoxLayout(self)
+        self.resize(560, 660)
+        self.setMinimumSize(500, 420)  # resizable + scrolls when short (responsive)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        lay = QVBoxLayout(content)
         lay.setContentsMargins(28, 24, 28, 22)
         lay.setSpacing(16)
 
@@ -1381,16 +1392,23 @@ class SettingsDialog(QDialog):
             lay.addLayout(seg)
             self._sync_theme_seg()
 
-        row = QHBoxLayout()
+        lay.addStretch(1)
+        scroll.setWidget(content)
+        root.addWidget(scroll, 1)
+
+        # Footer pinned below the scroll area, always visible.
+        root.addWidget(_hairline())
+        footer = QHBoxLayout()
+        footer.setContentsMargins(28, 12, 28, 16)
         cancel = QPushButton("Cancel")
         save = QPushButton("Save")
         save.setObjectName("primary")
         cancel.clicked.connect(self.reject)
         save.clicked.connect(self.accept)
-        row.addStretch(1)
-        row.addWidget(cancel)
-        row.addWidget(save)
-        lay.addLayout(row)
+        footer.addStretch(1)
+        footer.addWidget(cancel)
+        footer.addWidget(save)
+        root.addLayout(footer)
 
     def _engine_pref(self) -> str:
         return (self.store.get_meta("embedder") if self.store else None) or config.EMBEDDER_PREFERENCE
@@ -2709,7 +2727,11 @@ def main() -> int:
         app.styleHints().colorSchemeChanged.connect(_on_scheme)
     except Exception:
         pass
-    app.setFont(QFont("-apple-system", 13))
+    mono = QFont()
+    mono.setFamilies(["SF Mono", "JetBrains Mono", "Menlo", "Cascadia Code", "Consolas", "monospace"])
+    mono.setPointSize(13)
+    mono.setStyleHint(QFont.Monospace)
+    app.setFont(mono)
     app.setWindowIcon(QIcon(_asset("drifter_icon.png")))
 
     show_splash(app)  # logo, fades in then out
