@@ -25,12 +25,21 @@ drifter
 
 `drifter` opens the native desktop app and walks you through a 3-step setup
 (welcome → connect your AI with a "Get an API key ↗" link → your goal). Replies
-stream in, drift tracks live, and the monitor view stays clean — the chart leads, a
-single control bar holds the threshold + *Auto re-align*, and the legend, plain-language
-explanation and clipboard capture tuck into a collapsible **Details** panel.
+stream in, drift tracks live, and the monitor view stays clean — the chart leads with a
+small, always-visible **legend** docked inside it (painted swatches that match the actual
+chart lines: Goal · Recent context · Threshold · Normal range), and a single control bar
+holds just the threshold + *Auto re-align*. The deeper explanation lives behind the "?".
 
 **Appearance** lives in **Settings → Appearance**: a segmented **Follow system / Light /
-Dark** control that applies instantly and is remembered. (Default follows macOS.)
+Dark** control that applies instantly and is remembered. (Default follows macOS.) The
+header carries a gear ⚙ for Settings and a compact provider chip; long session titles
+elide instead of overflowing. **Clipboard capture** for web chats now lives in
+**Settings → Web chat capture**.
+
+**Pick an exact model.** For both the Claude API and your Claude subscription, the model
+list offers the floating aliases (`opus`/`sonnet`/`haiku`, always latest) **and** pinned
+IDs (`claude-opus-4-8`, `-4-7`, `-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5`) so you
+can lock a specific version — or type any.
 
 - `[llm]` — chat SDKs (Claude / Gemini / OpenAI).
 - `[semantic]` — `fastembed` for **neural** drift (onnxruntime, **no torch**;

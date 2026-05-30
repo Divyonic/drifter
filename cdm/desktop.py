@@ -20,7 +20,17 @@ from typing import List, Optional
 os.environ.setdefault("PYQTGRAPH_QT_LIB", "PySide6")
 
 import pyqtgraph as pg
-from PySide6.QtCore import QEventLoop, QPropertyAnimation, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import (
+    QEventLoop,
+    QPointF,
+    QPropertyAnimation,
+    QRectF,
+    Qt,
+    QThread,
+    QTimer,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
@@ -28,6 +38,7 @@ from PySide6.QtGui import (
     QIcon,
     QKeySequence,
     QPainter,
+    QPen,
     QPixmap,
     QShortcut,
 )
@@ -52,7 +63,9 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressDialog,
     QPushButton,
+    QGridLayout,
     QScrollArea,
+    QSizePolicy,
     QSplashScreen,
     QStackedWidget,
     QSplitter,
@@ -101,6 +114,10 @@ DARK = {
 }
 C = dict(LIGHT)  # current palette (mutated by set_dark)
 
+# Live MainWindows, so an automatic OS light/dark switch can re-pen their charts and
+# legend swatches (QSS alone doesn't repaint pyqtgraph pens or painted pixmaps).
+_LIVE_WINDOWS: list = []
+
 
 def set_dark(dark: bool) -> None:
     """Switch the active palette."""
@@ -114,15 +131,23 @@ QWidget { background: @bg@; color: @ink@; font-size: 13px; }
 QMainWindow, QDialog { background: @bg@; }
 QLabel#h1 { font-size: 26px; font-weight: 600; }
 QLabel#h2 { font-size: 17px; font-weight: 600; }
+QLabel#title { font-size: 18px; font-weight: 600; color: @ink@; }
 QLabel#muted { color: @muted@; }
 QLabel#anchor { color: @muted@; font-size: 12px; }
+QLabel#providerChip { color: @muted@; font-size: 12px; font-weight: 600; background: @panel@; border: 1px solid @line_soft@; border-radius: 11px; padding: 5px 11px; }
+QFrame#vsep { background: @line_soft@; border: none; }
+QPushButton#ghost { background: transparent; border: 1px solid @line_soft@; border-radius: 9px; padding: 7px 12px; font-weight: 600; }
+QPushButton#ghost:hover { background: @hover@; }
+QPushButton#iconBtn { background: transparent; border: none; border-radius: 9px; font-size: 17px; padding: 0; }
+QPushButton#iconBtn:hover { background: @hover@; }
 QLabel#coach { background: @coach_bg@; color: @coach_fg@; border-radius: 12px; padding: 11px 15px; font-weight: 600; }
 QLabel#warn { color: @coach_fg@; font-size: 12px; font-weight: 600; padding: 2px 2px; }
-QLabel#legend { color: @muted@; font-size: 12px; }
 QLabel#sectionLabel { color: @muted@; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
 QFrame#card { background: @bg@; border: 1px solid @line_soft@; border-radius: 16px; }
 QFrame#toolbar { background: @panel@; border: 1px solid @line_soft@; border-radius: 14px; }
-QFrame#details { background: @panel@; border: 1px solid @line_soft@; border-radius: 14px; }
+QFrame#legendStrip { background: transparent; border: none; }
+QLabel#legendSwatch { background: transparent; border: none; padding: 0; }
+QLabel#legendKey { color: @muted@; font-size: 12px; background: transparent; border: none; }
 QFrame#hairline { background: @line@; max-height: 1px; min-height: 1px; border: none; }
 QPushButton { background: @bg@; color: @ink@; border: 1px solid @line@; border-radius: 10px; padding: 9px 16px; font-weight: 600; }
 QPushButton:hover { background: @hover@; }
@@ -151,7 +176,12 @@ QLabel#chipOk { background: @okbg@; color: @okfg@; border-radius: 11px; padding:
 QLabel#chipBad { background: @badbg@; color: @badfg@; border-radius: 11px; padding: 6px 13px; font-weight: 700; }
 QLabel#bubbleUser { background: @ubg@; color: @ufg@; border-radius: 18px; padding: 11px 14px; }
 QLabel#bubbleAsst { background: @abg@; color: @afg@; border-radius: 18px; padding: 11px 14px; }
-QCheckBox { color: @muted@; }
+QCheckBox { color: @ink@; spacing: 8px; background: transparent; }
+QCheckBox:disabled { color: @muted@; }
+QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid @line@; border-radius: 5px; background: @input@; }
+QCheckBox::indicator:hover { border: 1px solid @accent@; }
+QCheckBox::indicator:checked { background: @accent@; border: 1px solid @accent@; image: url(@checkurl@); }
+QCheckBox::indicator:checked:hover { background: @accent_hover@; border: 1px solid @accent_hover@; }
 """
 
 
@@ -160,6 +190,9 @@ def build_qss() -> str:
     s = _QSS
     for key, value in C.items():
         s = s.replace(f"@{key}@", value)
+    # A bundled white tick for the checked checkbox. Qt's QSS url() wants a plain
+    # absolute path (a file:// URI gets treated as relative); forward slashes are safe.
+    s = s.replace("@checkurl@", _asset("check.svg").replace("\\", "/"))
     return s
 
 
@@ -226,6 +259,50 @@ def _rgba(hex_color: str, alpha: int) -> QColor:
     return c
 
 
+def _legend_swatch(kind: str, dpr: float = 2.0) -> QPixmap:
+    """A small pixmap that reproduces a chart mark exactly, for the legend strip.
+
+    Reads the live ``C`` palette so a theme switch just re-calls it. The pens mirror
+    :class:`DriftChart` one-for-one so the key can never lie about the chart:
+    ``goal`` solid accent line + dot · ``recent`` dashed muted line · ``threshold``
+    red dotted line · ``band`` translucent rounded rect.
+    """
+    w, h = 28, 14
+    pm = QPixmap(int(w * dpr), int(h * dpr))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(Qt.transparent)  # the card background shows through (works light + dark)
+    p = QPainter(pm)
+    cy = h / 2.0
+    try:
+        if kind == "goal":
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.setPen(QPen(QColor(C["accent"]), 2.2))
+            p.drawLine(QPointF(2, cy), QPointF(w - 2, cy))
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(C["accent"]))
+            p.drawEllipse(QPointF(w / 2.0, cy), 2.5, 2.5)
+        elif kind == "recent":
+            p.setRenderHint(QPainter.Antialiasing, True)
+            pen = QPen(_rgba(C["muted"], 150), 1.0)
+            pen.setStyle(Qt.DashLine)
+            p.setPen(pen)
+            p.drawLine(QPointF(2, cy), QPointF(w - 2, cy))
+        elif kind == "threshold":
+            p.setRenderHint(QPainter.Antialiasing, False)  # keep dots crisp
+            pen = QPen(QColor(C["danger"]), 1.4)
+            pen.setStyle(Qt.DotLine)
+            p.setPen(pen)
+            p.drawLine(QPointF(2, cy), QPointF(w - 2, cy))
+        elif kind == "band":
+            p.setRenderHint(QPainter.Antialiasing, True)
+            p.setPen(QPen(_rgba(C["line"], 90), 1))
+            p.setBrush(_rgba(C["muted"], 30))
+            p.drawRoundedRect(QRectF(2, 3, w - 4, h - 6), 3, 3)
+    finally:
+        p.end()
+    return pm
+
+
 def _shadow(widget: QWidget, blur: int = 30, dy: int = 8, alpha: int = 26) -> QWidget:
     eff = QGraphicsDropShadowEffect(widget)
     eff.setBlurRadius(blur)
@@ -239,6 +316,42 @@ def _hairline() -> QFrame:
     f = QFrame()
     f.setObjectName("hairline")
     return f
+
+
+def _vsep() -> QFrame:
+    """A short vertical hairline divider for toolbars/headers."""
+    f = QFrame()
+    f.setObjectName("vsep")
+    f.setFixedWidth(1)
+    f.setFixedHeight(20)
+    return f
+
+
+class ElidingLabel(QLabel):
+    """A QLabel that truncates with an ellipsis to fit its width (full text in tooltip).
+
+    Lets a long session title sit in the header without overflowing or clipping —
+    it elides on the right and re-elides as the window resizes.
+    """
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self._full = text
+        self.setToolTip(text)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+    def setText(self, text: str) -> None:  # noqa: D401
+        self._full = text or ""
+        self.setToolTip(self._full)
+        super().setText(self._full)
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        fm = self.fontMetrics()
+        elided = fm.elidedText(self._full, Qt.ElideRight, self.width())
+        painter.setPen(QColor(C["ink"]))  # follows the active light/dark palette
+        painter.drawText(self.rect(), int(self.alignment() | Qt.AlignVCenter), elided)
 
 
 def _asset(name: str) -> str:
@@ -416,7 +529,8 @@ class DriftChart(pg.PlotWidget):
         self._anchor = self.plot([], [], pen=pg.mkPen(C["accent"], width=2.2))
         self._anchor.setClipToView(True)
         self._anchor.setDownsampling(auto=True)
-        self._reference = self.plot([], [], pen=pg.mkPen(_rgba(C["muted"], 150), width=1.0))
+        self._reference = self.plot(
+            [], [], pen=pg.mkPen(_rgba(C["muted"], 150), width=1.0, style=Qt.DashLine))
         self._reference.setClipToView(True)
         self._reference.setDownsampling(auto=True)
         self._forecast = self.plot([], [], pen=pg.mkPen(C["accent"], width=1.4, style=Qt.DashLine))
@@ -489,7 +603,7 @@ class DriftChart(pg.PlotWidget):
                 self.getAxis(ax).setTextPen(C["muted"])
                 self.getAxis(ax).setPen(C["line_soft"])
             self._anchor.setPen(pg.mkPen(C["accent"], width=2.2))
-            self._reference.setPen(pg.mkPen(_rgba(C["muted"], 150), width=1.0))
+            self._reference.setPen(pg.mkPen(_rgba(C["muted"], 150), width=1.0, style=Qt.DashLine))
             self._forecast.setPen(pg.mkPen(C["accent"], width=1.4, style=Qt.DashLine))
             self._threshold.setPen(pg.mkPen(C["danger"], width=1.2, style=Qt.DotLine))
             self._cp.setPen(pg.mkPen(C["muted"], width=1.0, style=Qt.DashLine))
@@ -681,12 +795,14 @@ class ProviderSetup(QWidget):
         self.model_caption.setObjectName("muted")
         self.model_caption.setWordWrap(True)
 
+        self.form = form
+        self._key_field = self._wrap(key_row)
         form.addRow("Provider", self.provider)
         form.addRow("Status", self._wrap(status_row))
         form.addRow("Model", self._wrap(model_row))
-        form.addRow("", self.model_caption)
-        form.addRow("API key", self._wrap(key_row))
-        form.addRow("", self.hint)
+        form.addRow(self.model_caption)   # full-width span: no mid-word wrap/overlap
+        form.addRow("API key", self._key_field)
+        form.addRow(self.hint)            # full-width span
 
         self.provider.currentIndexChanged.connect(lambda _i: self._load(self._current(), None))
         self.get_key_btn.clicked.connect(self._open_key_url)
@@ -741,6 +857,11 @@ class ProviderSetup(QWidget):
         self.key.setVisible(not keyless)
         self.get_key_btn.setVisible(not keyless)
         self.refresh_btn.setVisible(not keyless)
+        # Hide the whole "API key" row for the keyless subscription (no empty field).
+        try:
+            self.form.setRowVisible(self._key_field, not keyless)
+        except Exception:
+            pass
         if keyless:
             self.model_caption.setText(
                 "Aliases (opus / sonnet / haiku) always run the latest of that family. "
@@ -993,6 +1114,22 @@ class SettingsDialog(QDialog):
                 "offline engine when no LLM is connected."
             )
             lay.addWidget(self.smart_check)
+
+            lay.addWidget(_hairline())
+            capture = QLabel("Web chat capture")
+            capture.setObjectName("h2")
+            lay.addWidget(capture)
+            cap_sub = QLabel(
+                "Monitor a chat in another app (ChatGPT, Gemini…) by copying its replies — "
+                "Drifter scores anything you copy against your goal. Starts a small "
+                "background clipboard watcher; nothing leaves your Mac."
+            )
+            cap_sub.setObjectName("muted")
+            cap_sub.setWordWrap(True)
+            lay.addWidget(cap_sub)
+            self.clip_check = QCheckBox("Capture clipboard")
+            self.clip_check.setChecked(is_watcher_running())
+            lay.addWidget(self.clip_check)
 
             lay.addWidget(_hairline())
             appearance = QLabel("Appearance")
@@ -1538,6 +1675,8 @@ class MainWindow(QMainWindow):
         self._timer.setInterval(1500)
         self._timer.timeout.connect(self._tick)
         self._timer.start()
+        if self not in _LIVE_WINDOWS:
+            _LIVE_WINDOWS.append(self)  # so auto OS theme switches re-pen this window
 
     # -- layout -------------------------------------------------------------- #
     def _build_ui(self, session) -> None:
@@ -1548,25 +1687,29 @@ class MainWindow(QMainWindow):
         outer.setSpacing(14)
 
         head = QHBoxLayout()
-        head.addWidget(logo_label(24))
-        head.addSpacing(8)
+        head.setSpacing(10)
+        head.addWidget(logo_label(22))
         back_btn = QPushButton("‹ Sessions")
+        back_btn.setObjectName("ghost")
         back_btn.setToolTip("Back to the session menu (your work is saved)")
         back_btn.clicked.connect(self._go_back)
         head.addWidget(back_btn)
-        title = QLabel(session.project_name if session else "Drifter")
-        title.setObjectName("h1")
-        head.addWidget(title)
-        head.addStretch(1)
+        head.addWidget(_vsep())
+        title = ElidingLabel(session.project_name if session else "Drifter")
+        title.setObjectName("title")
+        head.addWidget(title, 1)  # takes the slack; elides instead of overflowing
         self.provider_label = QLabel()
-        self.provider_label.setObjectName("muted")
+        self.provider_label.setObjectName("providerChip")
         head.addWidget(self.provider_label)
-        settings_btn = QPushButton("Settings")
+        settings_btn = QPushButton("⚙")
+        settings_btn.setObjectName("iconBtn")
+        settings_btn.setToolTip("Settings")
+        settings_btn.setFixedSize(34, 34)
         settings_btn.clicked.connect(self._open_settings)
         head.addWidget(settings_btn)
         outer.addLayout(head)
 
-        anchor = QLabel(f"Anchor goal — {session.anchor_goal if session else ''}")
+        anchor = QLabel(f"Goal · {session.anchor_goal if session else ''}")
         anchor.setObjectName("anchor")
         anchor.setWordWrap(True)
         outer.addWidget(anchor)
@@ -1673,11 +1816,13 @@ class MainWindow(QMainWindow):
         self.chart = DriftChart()
         self.chart.setMinimumHeight(200)  # shrinks with the window, stays legible
         cc.addWidget(self.chart)
+        cc.addWidget(_hairline())
+        cc.addWidget(self._build_legend_strip())  # small, always-visible key inside the card
         _shadow(chart_card)
         lay.addWidget(chart_card, 1)
 
-        # One tidy control bar: threshold + auto re-align live here; everything
-        # explanatory is tucked into the collapsible "Details" panel below.
+        # One tidy control bar: threshold + auto re-align live here. Everything
+        # explanatory lives in the legend (above) and the "?" help dialog.
         bar = QFrame()
         bar.setObjectName("toolbar")
         th_row = QHBoxLayout(bar)
@@ -1703,16 +1848,11 @@ class MainWindow(QMainWindow):
         self.auto_check = QCheckBox("Auto re-align")
         self.auto_check.setChecked(True)
         self.auto_check.setToolTip("Fold the corrective prompt into the next reply automatically when drift fires.")
-        self.details_btn = QPushButton("Details ▾")
-        self.details_btn.setObjectName("link")
-        self.details_btn.setToolTip("Legend, drift explanation, and clipboard capture")
-        self.details_btn.clicked.connect(self._toggle_details)
         th_row.addWidget(th_lbl)
         th_row.addWidget(self.threshold_spin)
         th_row.addWidget(help_btn)
         th_row.addStretch(1)
         th_row.addWidget(self.auto_check)
-        th_row.addWidget(self.details_btn)
         lay.addWidget(bar)
 
         # Extreme-threshold caption — subtle inline hint, only when at an extreme.
@@ -1721,38 +1861,6 @@ class MainWindow(QMainWindow):
         self.threshold_warn.setWordWrap(True)
         self.threshold_warn.setVisible(False)
         lay.addWidget(self.threshold_warn)
-
-        # Collapsible details: legend + plain-language explanation + clipboard capture.
-        self.details_panel = QFrame()
-        self.details_panel.setObjectName("details")
-        dl = QVBoxLayout(self.details_panel)
-        dl.setContentsMargins(14, 12, 14, 12)
-        dl.setSpacing(8)
-        legend = QLabel(
-            f"<span style='color:{C['accent']}'>●</span> <b>orange</b> = drift from your "
-            f"<b>original goal</b> &nbsp;&nbsp;"
-            f"<span style='color:{C['muted']}'>●</span> <b>grey</b> = drift from the "
-            f"<b>recent conversation</b> &nbsp;&nbsp;"
-            f"<span style='color:{C['danger']}'>●</span> alert threshold &nbsp;&nbsp;▭ normal range"
-        )
-        legend.setObjectName("legend")
-        legend.setTextFormat(Qt.RichText)
-        legend.setWordWrap(True)
-        dl.addWidget(legend)
-        explain = QLabel(
-            "Drift 0 = right on your goal · 1 = unrelated. Above the red line = off-track; "
-            "the shaded band is what’s normal for this chat, so rising above it signals a "
-            "real shift, not noise."
-        )
-        explain.setObjectName("muted")
-        explain.setWordWrap(True)
-        dl.addWidget(explain)
-        self.clip_check = QCheckBox("Capture clipboard — monitor a web chat by copying its replies")
-        self.clip_check.setChecked(is_watcher_running())
-        self.clip_check.toggled.connect(self._on_clip_toggle)
-        dl.addWidget(self.clip_check)
-        self.details_panel.setVisible(False)
-        lay.addWidget(self.details_panel)
 
         self.corr_card = QFrame()
         self.corr_card.setObjectName("card")
@@ -1817,9 +1925,20 @@ class MainWindow(QMainWindow):
         container.deleteLater()
 
     # -- coach + labels ------------------------------------------------------ #
+    # Short, header-friendly provider names (the full labels are too long for a chip).
+    _PROVIDER_SHORT = {
+        "claude-cli": "Claude", "claude": "Claude", "gemini": "Gemini", "openai": "OpenAI",
+    }
+
     def _sync_provider_label(self) -> None:
-        dot = "●" if provider_ready(self.provider) else "○"
-        self.provider_label.setText(f"{dot} {PROVIDERS[self.provider]['label']} · {self.model}")
+        ready = provider_ready(self.provider)
+        dot = "●" if ready else "○"
+        name = self._PROVIDER_SHORT.get(self.provider, PROVIDERS[self.provider]["label"])
+        self.provider_label.setText(f"{dot} {name} · {self.model}")
+        self.provider_label.setToolTip(
+            f"{PROVIDERS[self.provider]['label']} · {self.model}"
+            + ("" if ready else "  (not connected — open Settings)")
+        )
 
     def _update_coach(self) -> None:
         if self.smart_verdict:
@@ -1886,8 +2005,9 @@ class MainWindow(QMainWindow):
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self.provider, self.model, self.monitor.store, self)
         accepted = dlg.exec() == QDialog.Accepted
-        # Appearance can change live inside the dialog — re-tint the chart either way.
+        # Appearance can change live inside the dialog — re-tint the chart + legend either way.
         self.chart.apply_theme()
+        self._restyle_legend()
         if accepted:
             provider, model, _ = dlg.result_values()
             self.provider = provider
@@ -1900,45 +2020,92 @@ class MainWindow(QMainWindow):
                 self.smart_enabled = on
                 if not on:
                     self.smart_verdict = None
+            # Clipboard capture lives in Settings now — apply on save (only if changed,
+            # so re-saving doesn't spawn a duplicate watcher).
+            if hasattr(dlg, "clip_check"):
+                want = dlg.clip_check.isChecked()
+                if want != is_watcher_running():
+                    self._on_clip_toggle(want)
             self._sync_provider_label()
             self._update_coach()
             self._refresh_chart()
 
     def _explain_threshold(self) -> None:
         QMessageBox.information(
-            self, "What the threshold means",
+            self, "Reading the drift chart",
             "Drift is how far the conversation has moved from your original goal — "
             "0 means right on it, 1 means completely unrelated.\n\n"
-            "The threshold (red line) is how much drift you'll tolerate before Drifter "
-            "warns you and offers a corrective prompt. Lower = stricter.\n\n"
+            "The chart shows two lines:\n"
+            "• Goal (bold orange) — drift from your original goal.\n"
+            "• Recent context (grey dashed) — drift from the recent conversation, i.e. "
+            "whether you're also wandering turn-to-turn.\n\n"
+            "The threshold (red dotted line) is how much drift you'll tolerate before "
+            "Drifter warns you and offers a corrective prompt. Lower = stricter. "
             "Defaults: 0.65 in semantic mode, 0.80 in fast offline mode (its numbers run "
             "higher).\n\n"
-            "The shaded band is the ‘normal’ range learned from the start of THIS "
-            "conversation, so a rise above the band is a genuine shift rather than noise. "
-            "The dashed projection forecasts when drift will cross the threshold.",
+            "The shaded band (‘Normal range’) is the normal spread learned from the start "
+            "of THIS conversation, so a rise above the band is a genuine shift rather than "
+            "noise. The dashed projection forecasts when drift will cross the threshold.",
         )
 
     def _update_threshold_warning(self, value: float) -> None:
         if value <= 0.42:
             self.threshold_warn.setText(
-                "⚠️ Very strict — almost any tangent counts as drift. This can force the "
+                "Very strict — almost any tangent counts as drift. This can force the "
                 "conversation into a very niche slice of your goal."
             )
             self.threshold_warn.setVisible(True)
         elif value >= 0.90:
             self.threshold_warn.setText(
-                "⚠️ Very loose — drift will rarely be flagged, so off-track turns may slip by."
+                "Very loose — drift will rarely be flagged, so off-track turns may slip by."
             )
             self.threshold_warn.setVisible(True)
         else:
             self.threshold_warn.setVisible(False)
 
-    def _toggle_details(self) -> None:
-        # Key off the explicit hidden flag (not isVisible, which also reflects whether
-        # an ancestor is shown) so the toggle is deterministic.
-        show = self.details_panel.isHidden()
-        self.details_panel.setVisible(show)
-        self.details_btn.setText("Details ▴" if show else "Details ▾")
+    def _build_legend_strip(self) -> QFrame:
+        """A small, always-visible key docked inside the chart card.
+
+        Four atomic [painted-swatch + label] items in a 2-column grid so whole
+        entries reflow on narrow widths instead of word-wrapping through an entry.
+        Swatches are painted from the chart's exact pens (see :func:`_legend_swatch`).
+        """
+        strip = QFrame()
+        strip.setObjectName("legendStrip")
+        grid = QGridLayout(strip)
+        grid.setContentsMargins(2, 8, 2, 0)
+        grid.setHorizontalSpacing(20)
+        grid.setVerticalSpacing(6)
+        self._legend_items: List = []
+        entries = [("goal", "Goal"), ("recent", "Recent context"),
+                   ("threshold", "Threshold"), ("band", "Normal range")]
+        dpr = self.devicePixelRatioF() or 2.0
+        for i, (kind, text) in enumerate(entries):
+            item = QWidget()
+            row = QHBoxLayout(item)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            sw = QLabel()
+            sw.setObjectName("legendSwatch")
+            sw.setFixedSize(28, 14)
+            sw.setPixmap(_legend_swatch(kind, dpr))
+            sw.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            key = QLabel(text)
+            key.setObjectName("legendKey")
+            row.addWidget(sw)
+            row.addWidget(key)
+            row.addStretch(1)
+            grid.addWidget(item, i // 2, i % 2)
+            self._legend_items.append((sw, kind))
+        return strip
+
+    def _restyle_legend(self) -> None:
+        """Repaint legend swatches for the current palette (call on theme change)."""
+        if not hasattr(self, "_legend_items"):
+            return
+        dpr = self.devicePixelRatioF() or 2.0
+        for sw, kind in self._legend_items:
+            sw.setPixmap(_legend_swatch(kind, dpr))
 
     def _on_threshold(self, value: float) -> None:
         self.monitor.set_threshold(float(value))
@@ -2152,6 +2319,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         try:
+            if self in _LIVE_WINDOWS:
+                _LIVE_WINDOWS.remove(self)
             self._timer.stop()
             if self._thread and self._thread.isRunning():
                 self._thread.stop()
@@ -2198,6 +2367,13 @@ def main() -> int:
             except Exception:
                 return
             app.setStyleSheet(build_qss())
+            # QSS doesn't repaint pyqtgraph pens or painted swatches — do it explicitly.
+            for w in list(_LIVE_WINDOWS):
+                try:
+                    w.chart.apply_theme()
+                    w._restyle_legend()
+                except Exception:
+                    pass
 
     try:
         app.styleHints().colorSchemeChanged.connect(_on_scheme)
