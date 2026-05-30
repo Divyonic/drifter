@@ -2086,8 +2086,8 @@ class MainWindow(QMainWindow):
         chead.addWidget(reset_btn)
         cc.addLayout(chead)
         self.chart = DriftChart()
-        self.chart.setMinimumHeight(190)  # shrinks with the window, stays legible
-        cc.addWidget(self.chart)
+        self.chart.setMinimumHeight(120)  # low floor so the card never overflows
+        cc.addWidget(self.chart, 1)       # fills the card; legend stays pinned below it
         cc.addWidget(_hairline())
         cc.addWidget(self._build_legend_strip())  # small, always-visible key inside the card
         _shadow(chart_card)
@@ -2143,7 +2143,7 @@ class MainWindow(QMainWindow):
         ccc.addWidget(ct)
         self.corr_text = QPlainTextEdit()
         self.corr_text.setReadOnly(True)
-        self.corr_text.setFixedHeight(118)
+        self.corr_text.setFixedHeight(96)  # compact so it doesn't squeeze the chart
         ccc.addWidget(self.corr_text)
         crow = QHBoxLayout()
         copy_btn = QPushButton("Copy")
@@ -2228,6 +2228,7 @@ class MainWindow(QMainWindow):
         sv.addWidget(self.fc_label)
         _shadow(scard, blur=22, dy=5, alpha=18)
         row.addWidget(scard, 4)
+        strip.setMaximumHeight(176)  # stay compact so the chart card gets the height
         return strip
 
     def _set_status(self, kind: str, pill_text: str, reason: str) -> None:
