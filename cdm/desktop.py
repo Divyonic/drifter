@@ -2099,7 +2099,7 @@ class MonitorPage(QWidget):
         self.threshold_spin.setRange(0.30, 0.95)
         self.threshold_spin.setSingleStep(0.01)
         self.threshold_spin.setValue(round(self.monitor.threshold, 2))
-        self.threshold_spin.setFixedWidth(86)
+        self.threshold_spin.setFixedWidth(72)
         self.threshold_spin.setToolTip(
             "How far the conversation may drift from your goal before Drifter warns you.\n"
             "Lower = stricter. Drift: 0 = on goal, 1 = unrelated."
@@ -2110,9 +2110,9 @@ class MonitorPage(QWidget):
         help_btn.setFixedWidth(24)
         help_btn.setToolTip("What does the threshold mean?")
         help_btn.clicked.connect(self._explain_threshold)
-        self.auto_check = QCheckBox("Auto-align")
+        self.auto_check = QCheckBox("Auto")
         self.auto_check.setChecked(True)
-        self.auto_check.setToolTip("Auto re-align: fold the corrective prompt into the next reply automatically when drift fires.")
+        self.auto_check.setToolTip("Auto re-align — fold the corrective prompt into the next reply automatically when drift fires.")
         th_row.addWidget(th_lbl)
         th_row.addWidget(self.threshold_spin)
         th_row.addWidget(help_btn)
@@ -2436,41 +2436,35 @@ class MonitorPage(QWidget):
         # no-op kept so existing callers stay valid.
         return
 
+    def _show_coach(self, text: str) -> None:
+        self.coach.setText(text)
+        self.coach.setVisible(True)
+
     def _update_coach(self) -> None:
+        """Show the coach bar only when there's something to act on — hidden when on track."""
         if self.smart_verdict:
             v = self.smart_verdict
             if v["status"] == "drifting":
-                self.coach.setText("⚠️ Smart: off-track — " + v.get("reason", "") +
-                                   " Use the corrective on the right.")
-            else:
-                nice = {"on_track": "on track", "sub_task": "on track — working on a sub-task of your goal",
-                        "evolved": "your goal evolved — anchor updated"}.get(v["status"], "on track")
-                self.coach.setText(f"🧠 Smart: {nice} — {v.get('reason', '')}")
+                self._show_coach("Off-track — " + v.get("reason", "") + " Use the corrective on the right.")
+            elif v["status"] in ("sub_task", "evolved"):
+                nice = {"sub_task": "Working on a sub-task of your goal",
+                        "evolved": "Your goal evolved — anchor updated"}[v["status"]]
+                self._show_coach(f"{nice}. {v.get('reason', '')}".strip())
+            else:  # on_track — nothing to nag about
+                self.coach.setVisible(False)
             return
         if self.tail:
             if self._last_drift_high():
-                self.coach.setText(
-                    "③ Drift detected in your Claude Code chat — see the corrective prompt "
-                    "on the right; paste it into your terminal to re-align."
-                )
+                self._show_coach("Drift detected in your terminal — paste the corrective on the right to re-align.")
             else:
-                self.coach.setText(
-                    "● Monitoring your Claude Code terminal — keep chatting there; the "
-                    "graph updates live."
-                )
+                self.coach.setVisible(False)
             return
-        n = len(self.monitor.store.get_messages(self.session_id))
         if not provider_ready(self.provider):
-            self.coach.setText(
-                "① Connect your AI to start — open Settings (top right). Use your Claude "
-                "subscription (no key) if you have Claude Code, or paste an API key."
-            )
-        elif n == 0:
-            self.coach.setText("② You’re connected. Type your first message below and press Send.")
+            self._show_coach("Connect your AI to start — open Settings in the sidebar (Claude subscription needs no key).")
         elif self._last_drift_high():
-            self.coach.setText("③ Drift detected — review the corrective prompt and ‘Send to re-align’.")
+            self._show_coach("Drift detected — review the corrective prompt and ‘Send to re-align’.")
         else:
-            self.coach.setText("Monitoring — keep chatting. The chart updates live as drift changes.")
+            self.coach.setVisible(False)  # on track (or empty — the empty state already prompts)
 
     def _last_drift_high(self) -> bool:
         ts = self.monitor.timeseries(self.session_id)
@@ -2788,6 +2782,7 @@ class MonitorPage(QWidget):
         self.gauge.set_state(last, threshold, "DRIFTING" if high else "on track")
         self.gauge_turns.setText(f"{len(turns)} turn{'' if len(turns) == 1 else 's'}")
         self.spark.set_values(anchor, threshold)
+        self.spark.setVisible(len(anchor) >= 2)  # no half-empty sparkline on fresh sessions
         self._set_forecast_label(ts, high)
         if high:
             self._set_status("pillBad", "DRIFTING", "Off your goal — review the corrective.")
