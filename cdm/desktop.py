@@ -1983,7 +1983,7 @@ class MonitorPage(QWidget):
 
     def _build_chat_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMinimumWidth(260)
+        panel.setMinimumWidth(240)
         lay = QVBoxLayout(panel)
         lay.setContentsMargins(0, 0, 8, 0)
         lay.setSpacing(10)
@@ -2039,7 +2039,7 @@ class MonitorPage(QWidget):
     def _build_chart_center(self) -> QWidget:
         """The hero column: the big drift chart, threshold toolbar, and corrective card."""
         panel = QWidget()
-        panel.setMinimumWidth(360)
+        panel.setMinimumWidth(280)
         lay = QVBoxLayout(panel)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(12)
@@ -2055,7 +2055,7 @@ class MonitorPage(QWidget):
         chint = QLabel("· click to jump")
         chint.setObjectName("muted")
         chint.setToolTip("Click a point on the chart to scroll the chat to that message")
-        reset_btn = QPushButton("⤢ Reset view")
+        reset_btn = QPushButton("⤢ Reset")
         reset_btn.setObjectName("link")
         reset_btn.setToolTip("Reset zoom · scroll to zoom, drag to pan, hover for details")
         reset_btn.clicked.connect(lambda: self.chart.reset_view())
@@ -2097,9 +2097,9 @@ class MonitorPage(QWidget):
         help_btn.setFixedWidth(24)
         help_btn.setToolTip("What does the threshold mean?")
         help_btn.clicked.connect(self._explain_threshold)
-        self.auto_check = QCheckBox("Auto re-align")
+        self.auto_check = QCheckBox("Auto-align")
         self.auto_check.setChecked(True)
-        self.auto_check.setToolTip("Fold the corrective prompt into the next reply automatically when drift fires.")
+        self.auto_check.setToolTip("Auto re-align: fold the corrective prompt into the next reply automatically when drift fires.")
         th_row.addWidget(th_lbl)
         th_row.addWidget(self.threshold_spin)
         th_row.addWidget(help_btn)
@@ -2314,28 +2314,60 @@ class MonitorPage(QWidget):
         self._restyle_glance()
 
     # -- chat bubbles -------------------------------------------------------- #
+    def _bubble_cap(self) -> int:
+        """Max bubble width: ~88% of the chat column (so long bubbles never overflow)."""
+        try:
+            w = self.chat_scroll.viewport().width()
+        except Exception:
+            w = 0
+        return int(max(140, (w if w > 0 else 440) - 16) * 0.88)
+
+    def _size_bubble(self, label: QLabel, text: str, rich: bool) -> None:
+        """Hybrid sizing: hug short messages, cap long ones at the column (then wrap)."""
+        import re as _re
+        plain = _re.sub(r"<[^>]+>", " ", text) if rich else (text or "")
+        lines = plain.replace("\r", "").split("\n") or [""]
+        fm = label.fontMetrics()
+        widest = max((fm.horizontalAdvance(ln) for ln in lines), default=0)
+        label.setFixedWidth(max(56, min(widest + 30, self._bubble_cap())))
+
+    def _refit_bubbles(self) -> None:
+        """Re-fit all bubbles after the layout settles (deferred so widths aren't stale)."""
+        self._refit_pending = False
+        if getattr(self, "_dead", False):
+            return
+        for c in self._bubbles:
+            lbl = c.findChild(QLabel)
+            if lbl is not None and hasattr(lbl, "_raw"):
+                self._size_bubble(lbl, lbl._raw, lbl._rich)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if not getattr(self, "_refit_pending", False):
+            self._refit_pending = True
+            QTimer.singleShot(0, self._refit_bubbles)  # after children resize
+
     def _add_bubble(self, role: str, text: str, rich: bool = False) -> QLabel:
         is_user = (role or "").lower() == "user"
         bubble = QLabel()
         bubble.setObjectName("bubbleUser" if is_user else "bubbleAsst")
         bubble.setWordWrap(True)
         bubble.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        bubble.setMaximumWidth(760)  # sanity cap on very wide windows
         if rich:
             bubble.setTextFormat(Qt.RichText)
             bubble.setText(_md_to_html(text))
         else:
             bubble.setTextFormat(Qt.PlainText)
             bubble.setText(text)
-        # Bubble takes ~84% of the column (layout-driven, so it can never overflow or
-        # clip); a small gutter on the sender's side preserves the chat read.
+        bubble._raw, bubble._rich = text, rich  # for re-fitting on resize
+        self._size_bubble(bubble, text, rich)
         wrap = QHBoxLayout()
         if is_user:
-            wrap.addStretch(16)
-            wrap.addWidget(bubble, 84)
+            wrap.addStretch(1)
+            wrap.addWidget(bubble)
         else:
-            wrap.addWidget(bubble, 84)
-            wrap.addStretch(16)
+            wrap.addWidget(bubble)
+            wrap.addStretch(1)
         container = QWidget()
         container.setLayout(wrap)
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, container)
@@ -2566,6 +2598,8 @@ class MonitorPage(QWidget):
             return
         self._stream_text += delta
         self._stream_label.setText(self._stream_text + "▍")
+        self._stream_label._raw = self._stream_text
+        self._size_bubble(self._stream_label, self._stream_text, False)  # grow with text
         self.chat_scroll.verticalScrollBar().setValue(self.chat_scroll.verticalScrollBar().maximum())
 
     def _on_stream_done(self, full: str) -> None:
@@ -2575,6 +2609,8 @@ class MonitorPage(QWidget):
         if self._stream_label is not None:
             self._stream_label.setTextFormat(Qt.RichText)
             self._stream_label.setText(_md_to_html(full) if full else "<i>(no response)</i>")
+            self._stream_label._raw, self._stream_label._rich = full, True
+            self._size_bubble(self._stream_label, full, True)
         self._stream_label = None
         self._busy(False)
         if full:
@@ -2859,7 +2895,9 @@ class AppShell(QMainWindow):
         self._cur_page = PAGE_SESSIONS
         self.setWindowTitle("Drifter")
         self.resize(1280, 800)
-        self.setMinimumSize(1080, 600)  # sidebar + chat + hero chart + rail all fit
+        # sidebar(232) + chat(240) + chart(280) + rail(238) + gaps all fit at the min,
+        # so the chat is never clipped ("shows half") on a small window.
+        self.setMinimumSize(1030, 600)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -2888,6 +2926,8 @@ class AppShell(QMainWindow):
         self.sidebar.set_collapsed(collapsed)
         self.monitor.store.set_meta("sidebar_collapsed", "1" if collapsed else "0")
         self._apply_scale()  # content pane width changed → re-evaluate the UI scale
+        if self.monitor_page is not None:
+            QTimer.singleShot(0, self.monitor_page._refit_bubbles)  # re-fit to new width
 
     # -- navigation ---------------------------------------------------------- #
     def navigate(self, page: int) -> None:
@@ -2918,6 +2958,7 @@ class AppShell(QMainWindow):
         self._sync_provider_chip()
         self.navigate(PAGE_MONITOR)
         self._apply_scale()
+        QTimer.singleShot(0, lambda: self.monitor_page and self.monitor_page._refit_bubbles())
 
     def new_session(self) -> None:
         dlg = NewSessionDialog(self)
