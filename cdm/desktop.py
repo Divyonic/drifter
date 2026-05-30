@@ -31,6 +31,7 @@ from PySide6.QtCore import (
     QThread,
     QTimer,
     QUrl,
+    QVariantAnimation,
     Property,
     Signal,
 )
@@ -162,6 +163,7 @@ QFrame#toolbar { background: @panel@; border: 1px solid @line_soft@; border-radi
 QFrame#legendStrip { background: transparent; border: none; }
 QLabel#legendSwatch { background: transparent; border: none; padding: 0; }
 QLabel#legendKey { color: @muted@; font-size: 12px; background: transparent; border: none; }
+QLabel#emptyState { color: @muted@; font-size: 13px; padding: 56px 24px; }
 QFrame#hairline { background: @line@; max-height: 1px; min-height: 1px; border: none; }
 /* Single-line controls: NO vertical padding (it makes macOS clip the text); height
    comes from min-height so the text always has full room and centres vertically. */
@@ -220,6 +222,9 @@ QPushButton#navItem { background: transparent; border: none; border-radius: 10px
 QPushButton#navItem:hover { background: @hover@; color: @ink@; }
 QPushButton#navItem:checked { background: @sel@; color: @ink@; font-weight: 700; border-left: 3px solid @accent@; padding-left: 11px; }
 QPushButton#navItem:checked:hover { background: @sel@; }
+QPushButton#navItemCollapsed { background: transparent; border: none; border-radius: 10px; color: @muted@; padding: 0; min-height: 40px; font-size: 18px; }
+QPushButton#navItemCollapsed:hover { background: @hover@; color: @ink@; }
+QPushButton#navItemCollapsed:checked { background: @sel@; color: @ink@; }
 QPushButton#railToggle { background: transparent; border: none; border-radius: 8px; color: @muted@; font-size: 22px; font-weight: 600; padding: 0; }
 QPushButton#railToggle:hover { background: @hover@; color: @ink@; }
 """
@@ -1948,16 +1953,13 @@ class MonitorPage(QWidget):
         outer.setContentsMargins(24, 18, 24, 20)
         outer.setSpacing(14)
 
-        # The sidebar owns brand + nav, so the page header is just the session title
-        # and a live provider chip.
+        # The sidebar owns brand + nav + the provider chip, so the page header is just
+        # the session title (no duplicate provider chip here).
         head = QHBoxLayout()
         head.setSpacing(10)
         title = ElidingLabel(session.project_name if session else "Drifter")
         title.setObjectName("title")
         head.addWidget(title, 1)  # takes the slack; elides instead of overflowing
-        self.provider_label = QLabel()
-        self.provider_label.setObjectName("providerChip")
-        head.addWidget(self.provider_label)
         outer.addLayout(head)
 
         anchor = QLabel(f"Goal · {session.anchor_goal if session else ''}")
@@ -1995,12 +1997,23 @@ class MonitorPage(QWidget):
         self.chat_layout = QVBoxLayout(self.chat_inner)
         self.chat_layout.setContentsMargins(2, 2, 8, 2)
         self.chat_layout.setSpacing(8)
+        # Friendly empty state (shown until the first message lands).
+        self.empty_label = QLabel(
+            "Monitoring your Claude Code terminal — new turns appear here as you chat."
+            if self.tail else
+            "Send your first message below to start tracking drift against your goal."
+        )
+        self.empty_label.setObjectName("emptyState")
+        self.empty_label.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+        self.empty_label.setWordWrap(True)
+        self.chat_layout.addWidget(self.empty_label)
         self.chat_layout.addStretch(1)
         self.chat_scroll.setWidget(self.chat_inner)
         lay.addWidget(self.chat_scroll, 1)
 
         for m in self.monitor.store.get_messages(self.session_id):
             self._add_bubble(m.role, m.text, rich=(m.role or "").lower() != "user")
+        self.empty_label.setVisible(not self._bubbles)
 
         self.status = QLabel("")
         self.status.setObjectName("muted")
@@ -2137,7 +2150,7 @@ class MonitorPage(QWidget):
         ccc.addLayout(crow)
         _shadow(self.corr_card)
         lay.addWidget(self.corr_card)
-        self.corr_card.setVisible(False)
+        self.corr_card.setVisible(False)  # hidden until drift (animated in at runtime)
         return panel
 
     def _build_gauge_card(self) -> QFrame:
@@ -2244,30 +2257,55 @@ class MonitorPage(QWidget):
         return rail
 
     def _update_subgoals(self) -> None:
-        """Fill the focus/sub-goals card from the Smart verdict, else the goal state."""
-        lines: List[str] = []
+        """Fill the focus/sub-goals card from the Smart verdict, else the goal's guardrails.
+
+        Avoids the raw keyword 'current_focus' from offline goal-state (reads as noise);
+        falls back to the user's real constraints, then a friendly hint.
+        """
         v = self.smart_verdict
-        if v:
+        if v and (v.get("current_focus") or v.get("sub_goals")):
+            lines: List[str] = []
             focus = (v.get("current_focus") or "").strip()
             if focus:
                 lines.append(f"Now · {focus}")
             lines += [f"• {s}" for s in (v.get("sub_goals") or [])[:6]]
-        if not lines:
-            gs = self.monitor.latest_goal_state(self.session_id)
-            raw = (gs.raw if gs else {}) or {}
-            focus = (raw.get("current_focus") or "").strip()
-            if focus:
-                lines.append(f"Now · {focus}")
-            lines += [f"• {c}" for c in (raw.get("constraints") or [])[:5]]
-        self.subgoals_label.setText(
-            "\n".join(lines) if lines else "Sub-goals appear here as Smart mode reads the chat."
-        )
+            self.subgoals_label.setText("\n".join(lines))
+            return
+        # Offline fallback: show real guardrails (constraints), not keyword soup.
+        gs = self.monitor.latest_goal_state(self.session_id)
+        cons = ((gs.raw if gs else {}) or {}).get("constraints") or []
+        if cons:
+            self.subgoals_label.setText(
+                "Guardrails\n" + "\n".join(f"• {c}" for c in cons[:6])
+            )
+        else:
+            self.subgoals_label.setText(
+                "Smart mode breaks your goal into sub-goals as the conversation grows."
+            )
 
     def _jump_to_turn(self, turn: int) -> None:
         """Scroll the chat to the message for ``turn`` (chart point clicked)."""
         if 0 <= turn < len(self._bubbles):
             self.chat_scroll.ensureWidgetVisible(self._bubbles[turn], 0, 30)
             self.status.setText(f"Jumped to turn {turn}.")
+
+    def _set_corr_visible(self, show: bool) -> None:
+        """Show/hide the corrective card; slide it in (height) when it first appears."""
+        cur = self.corr_card.isVisible()
+        if show and not cur:
+            self.corr_card.setVisible(True)
+            h = self.corr_card.sizeHint().height()
+            self.corr_card.setMaximumHeight(0)
+            anim = QPropertyAnimation(self.corr_card, b"maximumHeight", self)
+            anim.setDuration(220)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.setStartValue(0)
+            anim.setEndValue(max(h, 1))
+            anim.finished.connect(lambda: self.corr_card.setMaximumHeight(16777215))
+            anim.start()
+            self._corr_anim = anim  # keep a ref so it isn't GC'd
+        elif not show and cur:
+            self.corr_card.setVisible(False)
 
     def _set_status(self, kind: str, pill_text: str, reason: str) -> None:
         """Set the status tile's pill (pillOk/pillBad/pillWarn) + reason line."""
@@ -2372,6 +2410,8 @@ class MonitorPage(QWidget):
         container.setLayout(wrap)
         self.chat_layout.insertWidget(self.chat_layout.count() - 1, container)
         self._bubbles.append(container)
+        if hasattr(self, "empty_label"):
+            self.empty_label.setVisible(False)
         QTimer.singleShot(30, lambda: self.chat_scroll.verticalScrollBar().setValue(
             self.chat_scroll.verticalScrollBar().maximum()))
         return bubble
@@ -2382,6 +2422,8 @@ class MonitorPage(QWidget):
         container = self._bubbles.pop()
         self.chat_layout.removeWidget(container)
         container.deleteLater()
+        if hasattr(self, "empty_label") and not self._bubbles:
+            self.empty_label.setVisible(True)
 
     # -- coach + labels ------------------------------------------------------ #
     # Short, header-friendly provider names (the full labels are too long for a chip).
@@ -2390,14 +2432,9 @@ class MonitorPage(QWidget):
     }
 
     def _sync_provider_label(self) -> None:
-        ready = provider_ready(self.provider)
-        dot = "●" if ready else "○"
-        name = self._PROVIDER_SHORT.get(self.provider, PROVIDERS[self.provider]["label"])
-        self.provider_label.setText(f"{dot} {name} · {self.model}")
-        self.provider_label.setToolTip(
-            f"{PROVIDERS[self.provider]['label']} · {self.model}"
-            + ("" if ready else "  (not connected — open Settings)")
-        )
+        # The provider chip now lives only in the sidebar (the shell syncs it); this is a
+        # no-op kept so existing callers stay valid.
+        return
 
     def _update_coach(self) -> None:
         if self.smart_verdict:
@@ -2712,7 +2749,7 @@ class MonitorPage(QWidget):
             else:  # offline corrective is already threshold-aware
                 corr = self.monitor.current_corrective_prompt(self.session_id)
             self.corr_text.setPlainText(corr)
-            self.corr_card.setVisible(True)
+            self._set_corr_visible(True)
         else:
             pill, label = {
                 "on_track": ("pillOk", "on track"),
@@ -2720,7 +2757,7 @@ class MonitorPage(QWidget):
                 "evolved": ("pillWarn", "goal evolved"),
             }.get(v["status"], ("pillOk", "on track"))
             self._set_status(pill, label, reason or "On your goal.")
-            self.corr_card.setVisible(False)
+            self._set_corr_visible(False)
 
     def _tick(self) -> None:
         if self.tail:
@@ -2755,10 +2792,10 @@ class MonitorPage(QWidget):
         if high:
             self._set_status("pillBad", "DRIFTING", "Off your goal — review the corrective.")
             self.corr_text.setPlainText(self.monitor.current_corrective_prompt(self.session_id))
-            self.corr_card.setVisible(True)
+            self._set_corr_visible(True)
         else:
             self._set_status("pillOk", "on track", "Monitoring — keep chatting.")
-            self.corr_card.setVisible(False)
+            self._set_corr_visible(False)
         self._update_smart_ui()  # smart verdict overrides the offline status when present
         self._update_subgoals()
 
@@ -2849,16 +2886,32 @@ class Sidebar(QFrame):
             seg.addWidget(btn)
         lay.addWidget(self._theme_row)
 
-    def set_collapsed(self, collapsed: bool) -> None:
+    def set_collapsed(self, collapsed: bool, animate: bool = True) -> None:
         """Collapse to a thin icon rail, or expand to the full labelled sidebar."""
         self._collapsed = collapsed
-        self.setFixedWidth(self._NARROW if collapsed else self._WIDE)
         m = 8 if collapsed else 12
         self.layout().setContentsMargins(m, 16, m, 16)
+        target = self._NARROW if collapsed else self._WIDE
+        if animate:
+            # Smooth rail slide (content swaps instantly).
+            anim = QVariantAnimation(self)
+            anim.setDuration(170)
+            anim.setEasingCurve(QEasingCurve.OutCubic)
+            anim.setStartValue(self.width())
+            anim.setEndValue(target)
+            anim.valueChanged.connect(lambda v: self.setFixedWidth(int(v)))
+            anim.finished.connect(lambda: self.setFixedWidth(target))
+            anim.start()
+            self._w_anim = anim  # keep a ref so it isn't GC'd
+        else:
+            self.setFixedWidth(target)
         for page, glyph, label in self._NAV:
             btn = self._nav[page]
             btn.setText(glyph if collapsed else f"{glyph}   {label}")
             btn.setToolTip(label if collapsed else "")
+            btn.setObjectName("navItemCollapsed" if collapsed else "navItem")
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
         self.new_btn.setText("+" if collapsed else "+  New session")
         self.new_btn.setToolTip("New session" if collapsed else "")
         self.logo.setVisible(not collapsed)
@@ -2919,7 +2972,7 @@ class AppShell(QMainWindow):
         self.sidebar.sync_theme(monitor.store.get_meta("theme") or "auto")
         self._sync_provider_chip()
         if monitor.store.get_meta("sidebar_collapsed") == "1":
-            self.sidebar.set_collapsed(True)
+            self.sidebar.set_collapsed(True, animate=False)
 
     def toggle_sidebar(self) -> None:
         collapsed = not self.sidebar._collapsed
