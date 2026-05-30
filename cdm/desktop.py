@@ -1941,6 +1941,11 @@ class MonitorPage(QWidget):
         if self in _LIVE_WINDOWS:
             _LIVE_WINDOWS.remove(self)
 
+    def set_brand_visible(self, show: bool) -> None:
+        """Show the header [DRIFTER] mark (used when the sidebar's own logo is hidden)."""
+        if hasattr(self, "header_logo"):
+            self.header_logo.setVisible(show)
+
     def retint(self) -> None:
         """Re-pen the chart + legend + gauge for the active palette (theme change)."""
         self.chart.apply_theme()
@@ -1953,13 +1958,18 @@ class MonitorPage(QWidget):
         outer.setContentsMargins(32, 20, 32, 22)  # breathing room from the window edges
         outer.setSpacing(14)
 
-        # The sidebar owns brand + nav + the provider chip, so the page header is just
-        # the session title (no duplicate provider chip here).
+        # Header: session title (left) + the [DRIFTER] brand mark (top-right). The brand
+        # shows when the sidebar is collapsed (its own logo is hidden then), so the logo
+        # is always visible exactly once.
         head = QHBoxLayout()
         head.setSpacing(10)
         title = ElidingLabel(session.project_name if session else "Drifter")
         title.setObjectName("title")
         head.addWidget(title, 1)  # takes the slack; elides instead of overflowing
+        self.header_logo = logo_label(22)
+        sb = getattr(self.shell, "sidebar", None)
+        self.header_logo.setVisible(bool(sb and sb._collapsed))
+        head.addWidget(self.header_logo)
         outer.addLayout(head)
 
         anchor = QLabel(f"Goal · {session.anchor_goal if session else ''}")
@@ -2975,6 +2985,7 @@ class AppShell(QMainWindow):
         self.monitor.store.set_meta("sidebar_collapsed", "1" if collapsed else "0")
         self._apply_scale()  # content pane width changed → re-evaluate the UI scale
         if self.monitor_page is not None:
+            self.monitor_page.set_brand_visible(collapsed)  # brand top-right when rail is closed
             QTimer.singleShot(0, self.monitor_page._refit_bubbles)  # re-fit to new width
 
     # -- navigation ---------------------------------------------------------- #
