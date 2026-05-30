@@ -1966,7 +1966,7 @@ class MonitorPage(QWidget):
         title = ElidingLabel(session.project_name if session else "Drifter")
         title.setObjectName("title")
         head.addWidget(title, 1)  # takes the slack; elides instead of overflowing
-        self.header_logo = logo_label(22)
+        self.header_logo = logo_label(28)
         sb = getattr(self.shell, "sidebar", None)
         self.header_logo.setVisible(bool(sb and sb._collapsed))
         head.addWidget(self.header_logo)
@@ -2841,7 +2841,7 @@ class Sidebar(QFrame):
         lay.setSpacing(6)
 
         brand = QHBoxLayout()
-        self.logo = logo_label(22)
+        self.logo = logo_label(28)
         self.toggle_btn = QPushButton("‹")
         self.toggle_btn.setObjectName("railToggle")
         self.toggle_btn.setFixedSize(36, 36)
