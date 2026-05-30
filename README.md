@@ -31,7 +31,9 @@ key ↗" link → your goal). Replies stream in and drift tracks live on a clean
 dashboard**: the drift chart sits alone with a **drift gauge** + **status** card column
 beside it. (Older builds opened a session-picker dialog then a separate window.)
 
-The dashboard: a **drift gauge** tile (an
+The Monitor lays out as three columns — **chat** · a **hero drift chart** (the main
+instrument; click any point to jump to that message) · a slim **rail** of cards. The
+rail stacks a **drift gauge** tile (an
 animated radial gauge with the live value, tick marks and a threshold notch), a **status**
 tile (an on-track/drifting pill, a one-line reason, a live drift **sparkline**, and a
 forecast — "crosses in ~N turns" / "stable"), and the detailed **drift chart** card below
