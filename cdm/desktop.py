@@ -556,7 +556,12 @@ class DriftChart(pg.PlotWidget):
         self.setMouseEnabled(x=True, y=True)   # scroll to zoom, drag to pan
         self.setLimits(yMin=-0.05, yMax=2.1)
         self.hideButtons()
-        self.setYRange(0, 2.0, padding=0.02)   # 0–2 cosine range; 1.0 sits centered
+        # Auto-framed y-axis: real drift clusters in a narrow band (≈0.7–1.0 on the
+        # lexical embedder), so a fixed 0–2 range squashes all movement into a flat
+        # sliver. We frame to the data instead (see _fit_y) unless the user zooms.
+        self._user_zoomed = False
+        self._thr = 0.65
+        self.setYRange(0, 1.0, padding=0)
         self.showGrid(x=False, y=True, alpha=0.08)
         for ax in ("left", "bottom"):
             self.getAxis(ax).setTextPen(C["muted"])
@@ -620,6 +625,9 @@ class DriftChart(pg.PlotWidget):
         self._texts: list = []
         self.scene().sigMouseMoved.connect(self._on_mouse_moved)
         self.scene().sigMouseClicked.connect(self._on_mouse_clicked)
+        # A manual zoom/pan freezes auto-framing until the user hits Reset.
+        self.getViewBox().sigRangeChangedManually.connect(
+            lambda *_: setattr(self, "_user_zoomed", True))
 
     def _on_mouse_clicked(self, event) -> None:
         """Click a point → emit its turn so the chat can scroll to that message."""
@@ -689,18 +697,46 @@ class DriftChart(pg.PlotWidget):
             pass
 
     def reset_view(self) -> None:
-        """Reset zoom/pan to the full series with the standard 0–1 drift range."""
+        """Re-enable auto-framing: x fits the series, y frames to the drift band."""
+        self._user_zoomed = False
         try:
-            self.getViewBox().autoRange(padding=0.04)
+            self.getViewBox().enableAutoRange(x=True)  # x snaps back to the full series
         except Exception:
             pass
-        self.setYRange(0, 2.0, padding=0.02)
+        self._fit_y()
+
+    def _fit_y(self) -> None:
+        """Frame the y-axis to the actual drift band (+ threshold + headroom).
+
+        Cosine drift lives on a 0–2 scale but in practice clusters in a tight band, so
+        a fixed 0–2 axis hides all movement. We frame to min/max of the plotted series,
+        always keeping the threshold line in view, with a minimum span so a calm chat
+        isn't zoomed into noise. No-op while the user has manually zoomed.
+        """
+        if self._user_zoomed:
+            return
+        vals = [v for v in (list(self._avals) + list(self._rvals)) if v is not None]
+        thr = self._thr
+        if not vals:
+            lo, hi = 0.0, max(thr + 0.3, 1.0)
+        else:
+            lo, hi = min(vals), max(vals)
+            lo, hi = min(lo, thr), max(hi, thr)
+        span = hi - lo
+        min_span = 0.32
+        if span < min_span:
+            mid = (lo + hi) / 2.0
+            lo, hi = mid - min_span / 2, mid + min_span / 2
+            span = min_span
+        pad = max(0.04, span * 0.16)
+        self.setYRange(max(0.0, lo - pad), min(2.1, hi + pad), padding=0)
 
     def update(self, ts: dict) -> None:
         turns = list(ts.get("turns") or [])
         anchor = list(ts.get("drift_from_anchor") or [])
         reference = list(ts.get("drift_from_reference") or [])
         threshold = float(ts.get("threshold", 0.65))
+        self._thr = threshold
         self._turns, self._avals, self._rvals = turns, anchor, reference
         self._roles = list(ts.get("roles") or [])
         self._texts = list(ts.get("texts") or [])
@@ -741,6 +777,8 @@ class DriftChart(pg.PlotWidget):
             self._forecast.setData([], [])
             self._fc_text.hide()
 
+        self._fit_y()  # frame the y-axis to the data band (unless the user zoomed)
+
 
 # --------------------------------------------------------------------------- #
 # Dashboard primitives (painter widgets): gauge, sparkline, stat card, pill
@@ -764,7 +802,6 @@ class DriftGauge(QWidget):
 
     _START = 235.0      # degrees (Qt: 0=3 o'clock, CCW+); arc opens at the bottom
     _SWEEP = -290.0     # clockwise
-    _MAXV = 2.0
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -772,6 +809,8 @@ class DriftGauge(QWidget):
         self.setMinimumSize(116, 100)
         self._value = 0.0
         self._threshold = 0.65
+        self._maxv = 1.0        # arc full-scale; reframed off the threshold in set_state
+        self._seen = False      # first paint jumps to value (no count-up from 0)
         self._caption = "on track"
         self._anim = QPropertyAnimation(self, b"value", self)
         self._anim.setDuration(520)
@@ -789,7 +828,15 @@ class DriftGauge(QWidget):
     def set_state(self, drift: float, threshold: float, caption: str = "") -> None:
         self._threshold = float(threshold)
         self._caption = caption or self._caption
-        target = max(0.0, min(self._MAXV, float(drift)))
+        # Frame the arc so the threshold notch sits ~2/3 along and over-threshold drift
+        # still has headroom — a fixed 0–2 scale would pin the fill to the lower third.
+        self._maxv = max(threshold * 1.5, threshold + 0.4, 1.0)
+        target = max(0.0, min(self._maxv, float(drift)))
+        if not self._seen:  # first load: snap to the value, don't count up from 0.00
+            self._seen = True
+            self._anim.stop()
+            self._set_value(target)
+            return
         self._anim.stop()
         self._anim.setStartValue(self._value)
         self._anim.setEndValue(target)
@@ -799,7 +846,7 @@ class DriftGauge(QWidget):
         self.update()
 
     def _frac(self, v: float) -> float:
-        return max(0.0, min(1.0, v / self._MAXV))
+        return max(0.0, min(1.0, v / self._maxv))
 
     def paintEvent(self, event) -> None:  # noqa: N802
         p = QPainter(self)
@@ -879,10 +926,16 @@ class Sparkline(QWidget):
         w, h = self.width(), self.height()
         pad = 3
         n = len(self._vals)
-        mx = max(self._maxv, max(self._vals))
+        # Frame to the data's own band (with a min span) so the trend fills the strip
+        # instead of hugging the floor of a fixed 0–2 scale.
+        lo, hi = min(self._vals), max(self._vals)
+        if hi - lo < 0.06:
+            mid = (lo + hi) / 2.0
+            lo, hi = mid - 0.03, mid + 0.03
+        rng = hi - lo
         def pt(i, v):
             x = pad + (w - 2 * pad) * (i / (n - 1))
-            y = h - pad - (h - 2 * pad) * (v / mx)
+            y = h - pad - (h - 2 * pad) * ((v - lo) / rng)
             return QPointF(x, y)
         col = QColor(_drift_color(self._vals[-1], self._threshold))
         # Soft fill under the line.
