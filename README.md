@@ -73,10 +73,12 @@ drifter
 
 ## How to use it
 
-1. **Open Drifter** → it lands on the **Sessions** page (or your last session). From the
-   sidebar: **+ New session** (project + goal + constraints), **Sessions** to
-   continue / rename / delete a past one, or **Import** a chat transcript
-   (JSON / `User:`-`Assistant:` markdown) to resume monitoring it.
+1. **Open Drifter** → it lands on the **Sessions** page (or your last session). Each past
+   session is a **card** showing its goal, turn count, last-active time and a **drift
+   status badge** (on track / nearing / drifting), so you can see at a glance which
+   conversations have wandered. From the sidebar: **+ New session** (project + goal +
+   constraints), **Sessions** to continue / rename / delete a past one, or **Import** a
+   chat transcript (JSON / `User:`-`Assistant:` markdown) to resume monitoring it.
 2. **Connect your AI** - the **Settings** page in the sidebar (or step 2 of first-run
    setup). Two ways, no billing surprises:
    - **No API key - use your Claude subscription.** If you have [Claude Code](https://claude.com/claude-code)
@@ -198,10 +200,14 @@ slice of your goal.
 
 ### Smarter graph
 
-The chart shows a learned **baseline band** (what's "normal" for *this* chat - so a
+The chart **frames to the live drift band** rather than a fixed 0-2 axis, so real
+movement is visible instead of a flat line (scroll to zoom, drag to pan, *Reset* to
+re-frame). It shows a learned **baseline band** (what's "normal" for *this* chat - so a
 rise above it is a real shift, not noise), a **changepoint marker** (where a sustained
 shift began, via CUSUM), and a **forecast** projection (when drift will cross the
-threshold). A legend + "?" explain what everything means. Detection quality tracks the
+threshold). The **drift gauge** and **sparkline** scale to the same band, and the status
+pill reads on track / nearing / drifting in step with them. A legend + "?" explain what
+everything means. Detection quality tracks the
 embedder: on the semantic backend `drifter eval` scores ~0.8 precision/recall; the
 lexical fallback can't separate reworded-on-topic from off-topic.
 
