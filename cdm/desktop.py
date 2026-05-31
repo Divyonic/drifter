@@ -2316,7 +2316,8 @@ class MonitorPage(QWidget):
         rv.setSpacing(12)
         rv.addWidget(self._build_gauge_card())
         rv.addWidget(self._build_status_card())
-        rv.addWidget(self._build_subgoals_card(), 1)  # stretches to fill the rail
+        rv.addWidget(self._build_subgoals_card())
+        rv.addStretch(1)  # cards sit at their natural height; slack pools at the bottom
         return rail
 
     def _update_subgoals(self) -> None:
@@ -2851,6 +2852,10 @@ class MonitorPage(QWidget):
             self._set_status("pillBad", "DRIFTING", "Off your goal — review the corrective.")
             self.corr_text.setPlainText(self.monitor.current_corrective_prompt(self.session_id))
             self._set_corr_visible(True)
+        elif turns and last >= threshold * 0.8:
+            # Matches the gauge's amber band (_drift_color) so the two signals agree.
+            self._set_status("pillWarn", "nearing", "Drifting toward the edge — watch the next few turns.")
+            self._set_corr_visible(False)
         else:
             self._set_status("pillOk", "on track", "Monitoring — keep chatting.")
             self._set_corr_visible(False)
