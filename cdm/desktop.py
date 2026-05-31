@@ -216,6 +216,15 @@ QCheckBox::indicator { width: 16px; height: 16px; border: 1px solid @line@; bord
 QCheckBox::indicator:hover { border: 1px solid @accent@; }
 QCheckBox::indicator:checked { background: @accent@; border: 1px solid @accent@; image: url(@checkurl@); }
 QCheckBox::indicator:checked:hover { background: @accent_hover@; border: 1px solid @accent_hover@; }
+/* --- Session cards (Sessions page) --- */
+QFrame#sessionCard { background: @panel@; border: 1px solid @line@; border-radius: 14px; }
+QFrame#sessionCard:hover { border: 1px solid @accent@; background: @hover@; }
+QFrame#sessionCard[selected="true"], QFrame#sessionCard[selected="true"]:hover { border: 2px solid @accent@; background: @sel@; }
+QLabel#cardTitle { color: @ink@; font-size: 15px; font-weight: 700; }
+QLabel#cardGoal { color: @muted@; font-size: 12px; }
+QLabel#cardMeta { color: @muted@; font-size: 11px; }
+QLabel#pillNew { background: @line_soft@; color: @muted@; border-radius: 9px; padding: 4px 11px; font-size: 11px; font-weight: 700; }
+QLabel#emptySessions { color: @muted@; font-size: 13px; }
 /* --- App-shell sidebar --- */
 QFrame#sidebar { background: @panel@; border: none; border-right: 1px solid @line_soft@; }
 QPushButton#navItem { background: transparent; border: none; border-radius: 10px; color: @muted@; text-align: left; padding: 0 14px; min-height: 38px; font-size: 14px; font-weight: 600; }
@@ -387,9 +396,10 @@ class ElidingLabel(QLabel):
     it elides on the right and re-elides as the window resizes.
     """
 
-    def __init__(self, text: str = "", parent=None) -> None:
+    def __init__(self, text: str = "", parent=None, color_key: str = "ink") -> None:
         super().__init__(text, parent)
         self._full = text
+        self._color_key = color_key  # palette key painted (e.g. "ink" or "muted")
         self.setToolTip(text)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
@@ -403,7 +413,7 @@ class ElidingLabel(QLabel):
         painter = QPainter(self)
         fm = self.fontMetrics()
         elided = fm.elidedText(self._full, Qt.ElideRight, self.width())
-        painter.setPen(QColor(C["ink"]))  # follows the active light/dark palette
+        painter.setPen(QColor(C.get(self._color_key, C["ink"])))  # follows light/dark
         painter.drawText(self.rect(), int(self.alignment() | Qt.AlignVCenter), elided)
 
 
@@ -1793,6 +1803,78 @@ class ClaudeCodeDialog(QDialog):
         self.accept()
 
 
+def _relative_time(iso: str) -> str:
+    """Friendly 'last active' string from an ISO timestamp (best-effort)."""
+    from datetime import datetime
+    try:
+        dt = datetime.fromisoformat(iso)
+        secs = max(0.0, (datetime.now() - dt).total_seconds())
+    except Exception:
+        return (iso or "")[:16].replace("T", "  ")
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        return f"{int(secs // 60)} min ago"
+    if secs < 86400:
+        return f"{int(secs // 3600)} h ago"
+    days = int(secs // 86400)
+    if days < 7:
+        return f"{days} day{'s' if days != 1 else ''} ago"
+    try:
+        return dt.strftime("%b %d, %Y")
+    except Exception:
+        return iso[:10]
+
+
+class SessionCard(QFrame):
+    """A rich, clickable session row: name + status badge, goal preview, meta line."""
+
+    clicked = Signal(str)     # single click → select
+    activated = Signal(str)   # double click → open
+    _PILL = {"ok": "pillOk", "warn": "pillWarn", "bad": "pillBad", "new": "pillNew"}
+
+    def __init__(self, sid: str, name: str, goal: str, turns: int,
+                 when: str, status: tuple) -> None:
+        super().__init__()
+        self.sid = sid
+        self.setObjectName("sessionCard")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setAttribute(Qt.WA_Hover, True)  # so QSS :hover fires on the frame
+        v = QVBoxLayout(self)
+        v.setContentsMargins(16, 13, 16, 13)
+        v.setSpacing(5)
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        title = ElidingLabel(name or "Untitled")
+        title.setObjectName("cardTitle")
+        badge = QLabel(status[1])
+        badge.setObjectName(self._PILL.get(status[0], "pillNew"))
+        top.addWidget(title, 1)
+        top.addWidget(badge, 0, Qt.AlignTop)
+        v.addLayout(top)
+        if goal:
+            g = ElidingLabel(goal, color_key="muted")
+            g.setObjectName("cardGoal")
+            v.addWidget(g)
+        meta = QLabel(f"{turns} turn{'' if turns == 1 else 's'}  ·  {when}")
+        meta.setObjectName("cardMeta")
+        v.addWidget(meta)
+        _shadow(self, blur=20, dy=4, alpha=24)
+
+    def set_selected(self, on: bool) -> None:
+        self.setProperty("selected", "true" if on else "false")
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def mousePressEvent(self, e) -> None:  # noqa: N802
+        self.clicked.emit(self.sid)
+        super().mousePressEvent(e)
+
+    def mouseDoubleClickEvent(self, e) -> None:  # noqa: N802
+        self.activated.emit(self.sid)
+        super().mouseDoubleClickEvent(e)
+
+
 class SessionsPage(QWidget):
     """The session picker — page 1 of the app shell (was LaunchDialog).
 
@@ -1815,10 +1897,18 @@ class SessionsPage(QWidget):
         prompt.setObjectName("muted")
         root.addWidget(prompt)
 
-        self.list = QListWidget()
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        host = QWidget()
+        self.cards_layout = QVBoxLayout(host)
+        self.cards_layout.setContentsMargins(2, 2, 2, 2)
+        self.cards_layout.setSpacing(10)
+        self.scroll.setWidget(host)
+        self._cards: dict = {}
+        self._selected: Optional[str] = None
         self._populate()
-        self.list.itemDoubleClicked.connect(lambda _i: self._continue())
-        root.addWidget(self.list, 1)
+        root.addWidget(self.scroll, 1)
 
         manage = QHBoxLayout()
         rename_btn = QPushButton("Rename")
@@ -1848,24 +1938,69 @@ class SessionsPage(QWidget):
         self.hello.setText(time_greeting(load_profile_name()))
         self._populate()
 
+    def _clear_cards(self) -> None:
+        while self.cards_layout.count():
+            it = self.cards_layout.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        self._cards = {}
+
+    def _session_status(self, sid: str) -> tuple:
+        """('ok'|'warn'|'bad'|'new', label) from the latest drift vs the threshold."""
+        try:
+            ts = self.monitor.timeseries(sid)
+            anchor = ts.get("drift_from_anchor") or []
+            thr = float(ts.get("threshold", self.monitor.threshold))
+        except Exception:
+            return ("new", "new")
+        if not anchor:
+            return ("new", "new")
+        last = anchor[-1]
+        if last >= thr:
+            return ("bad", "drifting")
+        if last >= thr * 0.8:
+            return ("warn", "nearing")
+        return ("ok", "on track")
+
     def _populate(self) -> None:
-        self.list.clear()
-        for s in self.monitor.store.list_sessions():
+        self._clear_cards()
+        sessions = self.monitor.store.list_sessions()
+        if not sessions:
+            empty = QLabel(
+                "No sessions yet.\n\nUse  + New session  in the sidebar to start one, "
+                "or  Import chat…  to monitor an existing transcript."
+            )
+            empty.setObjectName("emptySessions")
+            empty.setWordWrap(True)
+            empty.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+            self.cards_layout.addWidget(empty)
+            self.cards_layout.addStretch(1)
+            self._selected = None
+            return
+        for s in sessions:
             try:
-                n = len(self.monitor.store.get_messages(s.session_id))
+                n = self.monitor.store.next_turn_id(s.session_id)
             except Exception:
                 n = 0
-            item = QListWidgetItem(
-                f"{s.project_name}\n{n} turns · {s.updated_at[:16].replace('T', '  ')}"
+            card = SessionCard(
+                s.session_id, s.project_name, s.anchor_goal, n,
+                _relative_time(s.updated_at), self._session_status(s.session_id),
             )
-            item.setData(Qt.UserRole, s.session_id)
-            self.list.addItem(item)
-        if self.list.count():
-            self.list.setCurrentRow(0)
+            card.clicked.connect(self._select)
+            card.activated.connect(self.shell.open_session)
+            self.cards_layout.addWidget(card)
+            self._cards[s.session_id] = card
+        self.cards_layout.addStretch(1)
+        self._select(sessions[0].session_id)  # default selection
+
+    def _select(self, sid: str) -> None:
+        self._selected = sid
+        for cid, card in self._cards.items():
+            card.set_selected(cid == sid)
 
     def _selected_id(self) -> Optional[str]:
-        item = self.list.currentItem()
-        return item.data(Qt.UserRole) if item else None
+        return self._selected
 
     def _import(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
