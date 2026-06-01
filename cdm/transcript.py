@@ -16,7 +16,7 @@ import os
 import re
 from typing import Any
 
-__all__ = ["parse_transcript"]
+__all__ = ["parse_transcript", "pick_anchor_goal"]
 
 # Role synonym mapping. Anything not listed (and non-empty) falls back to "user".
 _USER_ROLES = {"user", "human", "me", "you", "client", "customer", "prompt"}
@@ -298,3 +298,79 @@ def parse_transcript(source: str, fmt: str = "auto") -> list[dict]:
     except Exception:
         # Absolute backstop: the contract forbids raising on any input.
         return []
+
+
+# --- anchor selection --------------------------------------------------------
+# A transcript's first line is often NOT its goal — on Claude Code / agent logs
+# it is frequently a throwaway command ("delete this branch"), a branch name, a
+# slash command, or a markup/log line. These patterns let pick_anchor_goal skip
+# such turns and lock onto the first turn that reads like a stated objective.
+_ANCHOR_BRANCH = re.compile(r"^[\w.\-]+/[\w.\-]+$")          # "cursor/feat-50f6"
+_ANCHOR_SLASH_CMD = re.compile(r"^/[a-zA-Z][\w-]*")          # "/clear", "/compact"
+_ANCHOR_SHELL_VERB = re.compile(
+    r"^\s*(?:git|gh|npm|npx|pip|cd|ls|rm|mv|cp|cat|sudo|run|delete|remove|"
+    r"merge|rebase|checkout|commit|push|pull|clone|stash|kill|chmod)\b",
+    re.IGNORECASE,
+)
+_ANCHOR_MARKUP = re.compile(r"</?[a-zA-Z][\w-]*[>\s]")       # "<system-reminder>"
+_ANCHOR_DELETE_BRANCH = re.compile(r"\bdelete\s+(?:this\s+)?branch\b", re.IGNORECASE)
+_ANCHOR_WORD = re.compile(r"[A-Za-z]{2,}")
+
+
+def _looks_like_goal(text: str) -> bool:
+    """Heuristic: does *text* read like a stated objective rather than a
+    throwaway command, branch name, slash command, or log/markup line?"""
+    t = (text or "").strip()
+    if not t:
+        return False
+    first_line = t.splitlines()[0].strip()
+    if _ANCHOR_MARKUP.search(t):
+        return False
+    if _ANCHOR_SLASH_CMD.match(first_line):
+        return False
+    if _ANCHOR_BRANCH.match(first_line):
+        return False
+    if _ANCHOR_DELETE_BRANCH.search(t):
+        return False
+    words = _ANCHOR_WORD.findall(t)
+    # A short shell-command-shaped turn is not a goal; longer prose may be.
+    if _ANCHOR_SHELL_VERB.match(first_line) and len(words) < 12:
+        return False
+    # Require a little substance — a real goal is more than a word or two.
+    return len(words) >= 4
+
+
+def pick_anchor_goal(turns: list[dict], max_scan: int = 10, fallback: str = "") -> str:
+    """Choose a sensible anchor goal from parsed transcript *turns*.
+
+    The old behaviour — blindly taking ``turns[0]["text"]`` — anchors a session
+    on whatever the first line happened to be, which on Claude Code / agent
+    transcripts is often a throwaway command, a branch name, or a slash command
+    (the literal-turn-1 mis-anchor bug). This walks the early **user** turns and
+    returns the first that reads like an actual objective, falling back to the
+    most substantial early turn, then the first turn, then *fallback*.
+
+    Never raises; returns a trimmed string.
+    """
+    try:
+        if not turns:
+            return fallback
+        users = [t for t in turns if str(t.get("role", "")).lower() == "user"]
+        scan = (users or turns)[: max(1, max_scan)]
+        for t in scan:
+            text = str(t.get("text", "")).strip()
+            if _looks_like_goal(text):
+                return text
+        # Nothing obviously goal-like: take the most substantial early turn.
+        best = max(
+            scan,
+            key=lambda t: len(_ANCHOR_WORD.findall(str(t.get("text", "")))),
+            default=None,
+        )
+        if best is not None:
+            text = str(best.get("text", "")).strip()
+            if text:
+                return text
+        return str(turns[0].get("text", "")).strip() or fallback
+    except Exception:
+        return fallback

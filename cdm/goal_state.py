@@ -55,6 +55,8 @@ _STOPWORDS: frozenset[str] = frozenset(
     used
     per good bad nice great fine kind sort way stuff pretty much many every even
     back around actually basically honestly probably anyway etc lots still able
+    now then today currently soon later already yet anymore add adds adding done
+    one two three four five six seven eight nine ten
     """.split()
 )
 
@@ -72,11 +74,16 @@ _CLAUSE_SPLIT = re.compile(
 # are deliberately excluded — alone they fire on ordinary chatter ("we need to
 # fix the snacks", "we should grab lunch") and pollute the mined constraints. A
 # soft clause still qualifies if it carries a numeric limit (handled separately).
+#
+# Bare "cannot"/"can't" are deliberately NOT markers: in practice they are far
+# more often complaints or observations ("i can't zoom in", "it cannot connect")
+# than stated requirements, so they were the single biggest source of garbage
+# constraints. Genuine prohibitions are still captured by "must not" / "forbidden"
+# / "prohibited", and hard limits by the numeric/comparator patterns below.
 _STRONG_CONSTRAINT = re.compile(
     r"\b(?:must(?:\s+not)?|mustn'?t|shall(?:\s+not)?|"
     r"require[sd]?|requirement|"
-    r"non[- ]?negotiable|mandatory|prohibited|forbidden|"
-    r"cannot|can'?t)\b",
+    r"non[- ]?negotiable|mandatory|prohibited|forbidden)\b",
     re.IGNORECASE,
 )
 
@@ -117,6 +124,57 @@ _DECISION_KEYWORDS = re.compile(
 
 # Tokeniser for keyword frequency.
 _WORD = re.compile(r"[A-Za-z][A-Za-z'\-]+")
+
+# --- transcript/log noise rejection ------------------------------------------
+# When a session is fed a raw agent/Claude Code transcript, the "user" text can
+# contain markup, tool dumps, usage counters and summary boilerplate. None of
+# that is a user constraint or decision, so it is rejected before mining.
+_MARKUP_TAG = re.compile(r"</?[a-zA-Z][\w-]*[>\s]")  # <system-reminder>, </failures>
+_LOG_TOKENS = re.compile(
+    r"(?:input_tokens|output_tokens|cache_read|cache_creation|tool_use|"
+    r"tool_result|stop_reason|system-reminder|<command-|"
+    r"\btokens?\s+(?:used|remaining|left|spent)\b|\b\d[\d,]*\s+tokens?\b|"
+    r"\btraceback\b|\bstderr\b|\bstdout\b)",
+    re.IGNORECASE,
+)
+# A "key: value" / "key=value" line whose value is a bare number/identifier/bool
+# (no natural-language words) — i.e. a stat or log field, not a sentence.
+_STAT_KV = re.compile(r"^[-+*>\s]*[\w./-]{1,40}\s*[:=]\s*(\S.*)$")
+_BARE_VALUE = re.compile(r"^(?:[\d.,%$/\-\w]+|true|false|null|none)$", re.IGNORECASE)
+# Version-control / shell command text ("delete this branch", "merge branch",
+# a lone slash command or branch slug). Such turns are session plumbing, not the
+# user's goal/constraints/focus — the literal-turn-1 mis-anchor was exactly this.
+_BRANCH_ACTION = re.compile(
+    r"\b(?:delet|remov|drop|merg|checkout|rebas|switch|push|pull|creat)"
+    r"(?:e|es|ed|ing)?\s+(?:this\s+|the\s+|a\s+|my\s+)?branch\b",
+    re.IGNORECASE,
+)
+_CMD_LINE = re.compile(r"^\s*(?:/[a-zA-Z][\w-]*|[\w.]+/[\w.\-]+-[\w.\-]+)\s*$")
+
+
+def _looks_like_noise(clause: str) -> bool:
+    """Return True for transcript/log-shaped text that must never become a
+    constraint or decision: markup tags, usage/token stats, tool dumps, bare
+    ``key: value`` log fields, or code/path/ID-heavy fragments (vs prose).
+    """
+    c = clause.strip()
+    if not c:
+        return True
+    if _MARKUP_TAG.search(c):
+        return True
+    if _LOG_TOKENS.search(c):
+        return True
+    if _BRANCH_ACTION.search(c) or _CMD_LINE.match(c):
+        return True
+    kv = _STAT_KV.match(c)
+    if kv and _BARE_VALUE.match(kv.group(1).strip()):
+        return True
+    # Mostly non-alphabetic (paths, hashes, code) rather than prose.
+    if len(c) > 12:
+        letters = sum(ch.isalpha() for ch in c)
+        if letters < 0.5 * len(c):
+            return True
+    return False
 
 
 def _clauses(text: str) -> List[str]:
@@ -181,6 +239,8 @@ def _mine_constraints(messages: List[Message]) -> List[str]:
     found: List[str] = []
     for msg in _user_messages(messages):
         for clause in _clauses(msg.text or ""):
+            if _looks_like_noise(clause):
+                continue
             if _is_constraint_clause(clause):
                 found.append(clause)
     return found
@@ -191,6 +251,8 @@ def _mine_decisions(messages: List[Message]) -> List[str]:
     found: List[str] = []
     for msg in _user_messages(messages):
         for clause in _clauses(msg.text or ""):
+            if _looks_like_noise(clause):
+                continue
             if _is_decision_clause(clause):
                 found.append(clause)
     # Most-recent-first while preserving within-message order on reversal.
@@ -212,15 +274,24 @@ def _current_focus(messages: List[Message], window: int) -> str:
     recent = messages[-window:] if window > 0 else messages
     counts: Counter[str] = Counter()
     for msg in recent:
-        for token in _WORD.findall((msg.text or "").lower()):
-            # Drop apostrophes so contractions normalise onto the (apostrophe-free)
-            # stopword set: "i'd" -> "id", "we'll" -> "well", "don't" -> "dont".
-            word = token.replace("'", "").replace("’", "").strip("-")
-            if len(word) < 3:
+        for clause in _clauses(msg.text or ""):
+            # Skip transcript/log-shaped lines (markup, usage/token stats, tool
+            # dumps) so their tokens don't leak into the focus keywords.
+            if _looks_like_noise(clause):
                 continue
-            if word in _STOPWORDS:
-                continue
-            counts[word] += 1
+            for token in _WORD.findall(clause.lower()):
+                # Drop apostrophes so contractions normalise onto the (apostrophe-free)
+                # stopword set: "i'd" -> "id", "we'll" -> "well", "don't" -> "dont".
+                word = token.replace("'", "").replace("’", "").strip("-")
+                if len(word) < 3:
+                    continue
+                if word in _STOPWORDS:
+                    continue
+                # Drop identifier-shaped tokens (version numbers, hashes, branch
+                # slugs like "defence-tech-interactivity") — they aren't topics.
+                if any(ch.isdigit() for ch in word) or word.count("-") >= 2:
+                    continue
+                counts[word] += 1
 
     if counts:
         keywords = [w for w, _ in counts.most_common(_FOCUS_KEYWORDS)]

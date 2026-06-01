@@ -94,7 +94,7 @@ from cdm.llm import (
     save_key,
 )
 from cdm.monitor import DriftMonitor
-from cdm.transcript import parse_transcript
+from cdm.transcript import parse_transcript, pick_anchor_goal
 from cdm.watcher import is_watcher_running, start_watcher_process, stop_watcher
 
 # --------------------------------------------------------------------------- #
@@ -1702,15 +1702,21 @@ class NewSessionDialog(QDialog):
 
 
 def start_cc_monitoring(monitor: DriftMonitor, cc_path: str) -> Optional[str]:
-    """Create a Drifter session from a Claude Code transcript (anchor = first
-    prompt; ingest the rest). Returns the new session id, or None if empty."""
+    """Create a Drifter session from a Claude Code transcript.
+
+    The anchor is chosen by :func:`pick_anchor_goal` (the first substantive,
+    goal-like user turn) rather than the literal first line, which on Claude Code
+    logs is usually a throwaway command. The full transcript is then ingested so
+    the drift chart reflects the whole conversation. Returns the new session id,
+    or None if empty."""
     turns = cc.parse_transcript_file(cc_path)
     if not turns:
         return None
-    anchor = turns[0]["text"]
-    label = (anchor[:40] + "…") if len(anchor) > 40 else anchor
+    anchor = pick_anchor_goal(turns) or turns[0]["text"]
+    label = anchor.splitlines()[0].strip() if anchor else "session"
+    label = (label[:40] + "…") if len(label) > 40 else label
     session = monitor.start_session(f"Claude Code · {label}", anchor, [])
-    rest = [{"role": t["role"], "text": t["text"]} for t in turns[1:]]
+    rest = [{"role": t["role"], "text": t["text"]} for t in turns]
     if rest:
         monitor.ingest_transcript(session.session_id, rest)
     return session.session_id
@@ -1912,12 +1918,15 @@ class SessionsPage(QWidget):
 
         manage = QHBoxLayout()
         rename_btn = QPushButton("Rename")
+        edit_goal_btn = QPushButton("Edit goal")
         delete_btn = QPushButton("Delete")
         cc_btn = QPushButton("Monitor Claude Code…")
         rename_btn.clicked.connect(self._rename)
+        edit_goal_btn.clicked.connect(self._edit_goal)
         delete_btn.clicked.connect(self._delete)
         cc_btn.clicked.connect(self._monitor_cc)
         manage.addWidget(rename_btn)
+        manage.addWidget(edit_goal_btn)
         manage.addWidget(delete_btn)
         manage.addStretch(1)
         manage.addWidget(cc_btn)
@@ -2012,9 +2021,9 @@ class SessionsPage(QWidget):
         if not turns:
             QMessageBox.warning(self, "Drifter", "No turns could be parsed from that file.")
             return
-        session = self.monitor.start_session("Imported chat", turns[0]["text"], [])
-        if len(turns) > 1:
-            self.monitor.ingest_transcript(session.session_id, turns[1:])
+        anchor = pick_anchor_goal(turns) or turns[0]["text"]
+        session = self.monitor.start_session("Imported chat", anchor, [])
+        self.monitor.ingest_transcript(session.session_id, turns)
         self.shell.open_session(session.session_id)
 
     def _rename(self) -> None:
@@ -2028,6 +2037,23 @@ class SessionsPage(QWidget):
         if ok and name.strip():
             session.project_name = name.strip()
             self.monitor.store.update_session(session)
+            self._populate()
+
+    def _edit_goal(self) -> None:
+        sid = self._selected_id()
+        if not sid:
+            return
+        session = self.monitor.store.get_session(sid)
+        if session is None:
+            return
+        goal, ok = QInputDialog.getMultiLineText(
+            self, "Edit goal",
+            "North-star goal for this session (pin it so drift is measured against "
+            "what you actually want):",
+            session.anchor_goal or "",
+        )
+        if ok and goal.strip():
+            self.monitor.set_goal(sid, goal.strip())
             self._populate()
 
     def _delete(self) -> None:
@@ -2077,7 +2103,8 @@ class MonitorPage(QWidget):
     """
 
     def __init__(self, monitor: DriftMonitor, session_id: str,
-                 tail_path: Optional[str] = None, shell=None) -> None:
+                 tail_path: Optional[str] = None, shell=None,
+                 terminal_handle: Optional[str] = None) -> None:
         super().__init__()
         self.monitor = monitor
         self.session_id = session_id
@@ -2096,8 +2123,17 @@ class MonitorPage(QWidget):
         self.smart_verdict: Optional[dict] = None
         self._smart_thread: Optional[SmartThread] = None
         self._last_smart_n = -99
-        # Tail mode: monitor a live Claude Code terminal transcript (read-only).
+        # Tail mode: monitor a live Claude Code terminal transcript.
         self.tail = cc.ClaudeCodeTail(tail_path, start_at_end=True) if tail_path else None
+        # Forward mode: Drifter launched the terminal and holds its tty, so messages
+        # typed here can be sent INTO that `claude` session (reply tails back in).
+        self.terminal_handle = terminal_handle
+        self._forward_mode = bool(self.tail and terminal_handle)
+        self._awaiting_terminal = False
+        # Typing-indicator (animated dots) shared by the API stream + forward waits.
+        self._dots_timer: Optional[QTimer] = None
+        self._dots_phase = 0
+        self._dots_target = "bubble"
 
         session = monitor.store.get_session(session_id)
         self._build_ui(session)
@@ -2118,6 +2154,7 @@ class MonitorPage(QWidget):
         self._dead = True
         try:
             self._timer.stop()
+            self._stop_dots()
         except Exception:
             pass
         if self._thread and self._thread.isRunning():
@@ -2197,6 +2234,8 @@ class MonitorPage(QWidget):
         self.chat_layout.setSpacing(8)
         # Friendly empty state (shown until the first message lands).
         self.empty_label = QLabel(
+            "Linked to your Claude Code terminal — type below and it goes into the session; replies appear here."
+            if self._forward_mode else
             "Monitoring your Claude Code terminal — new turns appear here as you chat."
             if self.tail else
             "Send your first message below to start tracking drift against your goal."
@@ -2239,7 +2278,13 @@ class MonitorPage(QWidget):
         QShortcut(QKeySequence("Ctrl+Return"), self.input, activated=self._on_send)
         QShortcut(QKeySequence("Meta+Return"), self.input, activated=self._on_send)
 
-        if self.tail:  # read-only monitor: chatting happens in the terminal
+        if self._forward_mode:
+            # Drifter launched the terminal: type here, we forward into it.
+            self.input.setPlaceholderText("Message Claude in the terminal…   (⌘/Ctrl + Enter to send)")
+            self.regen_btn.hide()   # regenerate/stop are API-stream only
+            self.stop_btn.hide()
+            self.status.setText("● Linked to your Claude Code terminal — messages you send here go into it.")
+        elif self.tail:  # read-only monitor: chatting happens in the terminal
             self.input.hide()
             self.regen_btn.hide()
             self.stop_btn.hide()
@@ -2798,7 +2843,8 @@ class MonitorPage(QWidget):
     def _start_stream(self, realign: bool) -> None:
         """Open a live assistant bubble and stream a reply into it."""
         self._stream_text = ""
-        self._stream_label = self._add_bubble("assistant", "▍", rich=False)
+        self._stream_label = self._add_bubble("assistant", "•", rich=False)
+        self._start_dots("bubble")  # animated typing dots until the first token
         self._busy(True)
         self._thread = ChatThread(
             self.provider, self.model, get_key(self.provider), self._history(),
@@ -2813,6 +2859,9 @@ class MonitorPage(QWidget):
         text = self.input.toPlainText().strip()
         if not text or (self._thread and self._thread.isRunning()):
             return
+        if self._forward_mode:
+            self._forward_to_terminal(text)
+            return
         if not provider_ready(self.provider):
             QMessageBox.information(self, "Drifter", "Connect your AI in Settings first.")
             self._open_settings()
@@ -2823,9 +2872,57 @@ class MonitorPage(QWidget):
         self._refresh_chart()
         self._start_stream(bool(self.auto_check.isChecked() and res.get("alert")))
 
+    def _forward_to_terminal(self, text: str) -> None:
+        """Send a typed message into the linked Claude Code terminal.
+
+        We don't echo or store the turn ourselves — the running ``claude`` writes
+        both the prompt and its reply to the transcript, and the tail (in
+        :meth:`_tick`) ingests them, so they appear here automatically. We just show
+        an animated 'waiting' indicator until the reply lands.
+        """
+        if not self.terminal_handle or not cc.send_to_terminal(self.terminal_handle, text):
+            QMessageBox.warning(
+                self, "Drifter",
+                "Couldn't reach the Claude Code terminal. Type your message there "
+                "directly — this graph will still track it.",
+            )
+            return
+        self.input.clear()
+        self._awaiting_terminal = True
+        self._start_dots("status")
+
+    # -- typing indicator (animated dots) ------------------------------------ #
+    def _start_dots(self, target: str) -> None:
+        """Animate a '•••' typing indicator on ``target`` ('bubble' | 'status')."""
+        self._dots_target = target
+        self._dots_phase = 0
+        if self._dots_timer is None:
+            self._dots_timer = QTimer(self)
+            self._dots_timer.timeout.connect(self._animate_dots)
+        self._dots_timer.start(350)
+        self._animate_dots()
+
+    def _animate_dots(self) -> None:
+        if self._dead:
+            return
+        self._dots_phase = (self._dots_phase + 1) % 3
+        dots = "•" * (self._dots_phase + 1)  # cycle 1..3 dots
+        if self._dots_target == "bubble":
+            if self._stream_label is not None and not self._stream_text:
+                self._stream_label.setText(dots)
+                self._size_bubble(self._stream_label, dots, False)
+        else:  # status line (forward-to-terminal wait)
+            self.status.setText("Waiting for Claude in the terminal  " + dots)
+
+    def _stop_dots(self) -> None:
+        if self._dots_timer is not None:
+            self._dots_timer.stop()
+
     def _on_chunk(self, delta: str) -> None:
         if self._dead or self._stream_label is None:
             return
+        if not self._stream_text:
+            self._stop_dots()  # first real token arrived — drop the typing dots
         self._stream_text += delta
         self._stream_label.setText(self._stream_text + "▍")
         self._stream_label._raw = self._stream_text
@@ -2835,6 +2932,7 @@ class MonitorPage(QWidget):
     def _on_stream_done(self, full: str) -> None:
         if self._dead:
             return
+        self._stop_dots()
         full = full or self._stream_text
         if self._stream_label is not None:
             self._stream_label.setTextFormat(Qt.RichText)
@@ -2852,6 +2950,7 @@ class MonitorPage(QWidget):
     def _on_reply_error(self, message: str) -> None:
         if self._dead:
             return
+        self._stop_dots()
         if self._stream_label is not None:
             self._pop_last_bubble()
             self._stream_label = None
@@ -2881,10 +2980,13 @@ class MonitorPage(QWidget):
     def _send_corrective(self) -> None:
         if (self._thread and self._thread.isRunning()):
             return
+        prompt = self.monitor.current_corrective_prompt(self.session_id)
+        if self._forward_mode:
+            self._forward_to_terminal(prompt)  # re-align the terminal session
+            return
         if not provider_ready(self.provider):
             self._open_settings()
             return
-        prompt = self.monitor.current_corrective_prompt(self.session_id)
         self.monitor.add_turn(self.session_id, "user", prompt)
         self._add_bubble("user", "↻ Re-align: corrective prompt sent")
         self._refresh_chart()
@@ -2914,6 +3016,17 @@ class MonitorPage(QWidget):
         if self._dead:
             return
         self.smart_verdict = verdict
+        # When the LLM judges the goal to have legitimately evolved, persist the
+        # refined goal as the new anchor — otherwise the coach claims "anchor
+        # updated" while the stored anchor (possibly a mis-picked turn) never moves.
+        if verdict.get("status") == "evolved":
+            new_goal = (verdict.get("core_goal") or "").strip()
+            session = self.monitor.store.get_session(self.session_id)
+            if new_goal and session and new_goal != (session.anchor_goal or "").strip():
+                try:
+                    self.monitor.set_goal(self.session_id, new_goal)
+                except Exception:
+                    pass  # never let a re-anchor failure break the UI
         self._update_smart_ui()
         self._update_coach()
         self._update_subgoals()
@@ -2955,9 +3068,19 @@ class MonitorPage(QWidget):
     def _tick(self) -> None:
         if self.tail:
             try:
+                got_assistant = False
                 for t in self.tail.new_turns():
                     self.monitor.add_turn(self.session_id, t["role"], t["text"])
                     self._add_bubble(t["role"], t["text"], rich=(t["role"] != "user"))
+                    if (t["role"] or "").lower() == "assistant":
+                        got_assistant = True
+                # A forwarded message has been answered — drop the waiting indicator.
+                if got_assistant and self._awaiting_terminal:
+                    self._awaiting_terminal = False
+                    self._stop_dots()
+                    self.status.setText(
+                        "● Linked to your Claude Code terminal — messages you send here go into it."
+                    )
             except Exception:
                 pass
         self._refresh_chart()
@@ -3193,7 +3316,8 @@ class AppShell(QMainWindow):
         self.stack.setCurrentIndex(page)
         self.sidebar.set_active(page)
 
-    def open_session(self, session_id: str, tail_path: Optional[str] = None) -> None:
+    def open_session(self, session_id: str, tail_path: Optional[str] = None,
+                     terminal_handle: Optional[str] = None) -> None:
         self.monitor.store.set_active_session(session_id)
         # Replace whatever sits at index 0 (the placeholder or the previous MonitorPage)
         # — removing first keeps Sessions/Settings on their fixed indices (insertWidget
@@ -3204,7 +3328,8 @@ class AppShell(QMainWindow):
         if old is not None:
             self.stack.removeWidget(old)
             old.deleteLater()
-        page = MonitorPage(self.monitor, session_id, tail_path, shell=self)
+        page = MonitorPage(self.monitor, session_id, tail_path, shell=self,
+                           terminal_handle=terminal_handle)
         self.stack.insertWidget(PAGE_MONITOR, page)
         self.monitor_page = page
         self._sync_provider_chip()
@@ -3222,20 +3347,26 @@ class AppShell(QMainWindow):
             return
         session = self.monitor.start_session(name or "Untitled", goal, cons)
         tail_path = None
+        terminal_handle = None
         if dlg.open_in_cc():
-            tail_path = self._launch_and_attach_cc(
+            tail_path, terminal_handle = self._launch_and_attach_cc(
                 dlg.cc_dir(), goal, cons, name or "Drifter session"
             )
-        self.open_session(session.session_id, tail_path)
+        self.open_session(session.session_id, tail_path, terminal_handle)
 
-    def _launch_and_attach_cc(self, cwd, goal, cons, name) -> Optional[str]:
-        """Open a seeded Claude Code session in Terminal and wait for its transcript."""
+    def _launch_and_attach_cc(self, cwd, goal, cons, name):
+        """Open a seeded Claude Code session in Terminal and wait for its transcript.
+
+        Returns ``(tail_path, terminal_handle)``: the transcript to tail, and the
+        terminal's tty so the Monitor page can forward messages into it (either may
+        be None if launch or auto-detect didn't fully succeed).
+        """
         # Pause the active page's tick so it can't fire mid-launch (nested event loop).
         if self.monitor_page is not None:
             self.monitor_page._timer.stop()
         try:
             before = cc.snapshot_transcripts()
-            ok = cc.launch_claude_in_terminal(
+            ok, terminal_handle = cc.launch_claude_in_terminal(
                 cwd, kickoff=_cc_kickoff(goal, cons), anchor=_cc_anchor(goal, cons), name=name
             )
             if not ok:
@@ -3244,7 +3375,7 @@ class AppShell(QMainWindow):
                     "Couldn't open a Terminal session. Start `claude` yourself, then use "
                     "‘Monitor Claude Code…’ to attach.",
                 )
-                return None
+                return (None, None)
             prog = QProgressDialog("Opening Claude Code — waiting for the session…", None, 0, 0, self)
             prog.setWindowTitle("Drifter")
             prog.setCancelButton(None)
@@ -3273,7 +3404,7 @@ class AppShell(QMainWindow):
                     "Opened Claude Code, but couldn't auto-detect the session yet. Once it's "
                     "running, use ‘Monitor Claude Code…’ to attach it.",
                 )
-            return found["path"]
+            return (found["path"], terminal_handle)
         finally:
             if self.monitor_page is not None:
                 self.monitor_page._timer.start()

@@ -95,10 +95,20 @@ drifter
 
 **New session → launch Claude Code for you.** In **New session**, tick *"Open a new
 Claude Code session in Terminal, seeded with this goal"* and pick a folder. Drifter
-opens a fresh `claude` session in Terminal - seeded with your goal + constraints (as
-the first message *and* an appended system prompt) - then auto-detects its transcript
-and attaches to monitor it. Your Drifter anchor and the Claude Code session share the
-same goal automatically.
+opens a fresh `claude` session - seeded with your goal + constraints (as the first
+message *and* an appended system prompt) - then auto-detects its transcript and
+attaches to monitor it. Your Drifter anchor and the Claude Code session share the same
+goal automatically.
+
+Once it's linked you can **type in Drifter's chat and it goes straight into that
+terminal session** - your message and Claude's reply flow back into Drifter's chat and
+drift chart, and an animated indicator shows while you wait for the reply. This works
+**cross-platform**: if [tmux](https://github.com/tmux/tmux) is installed it drives the
+session via `tmux send-keys` on macOS, Linux and Windows (WSL / Git-Bash / MSYS) - no
+accessibility permissions needed; on macOS without tmux it falls back to Terminal.app
+via AppleScript. Drifter opens a visible terminal attached to the session when it can
+(Terminal.app, `gnome-terminal`/`konsole`/`xterm`/…, or Windows Terminal); if it can't,
+forwarding still works - just `tmux attach` yourself and Drifter keeps tailing it.
 
 **Connecting your AI** shows a live **status** (● connected / ○ not connected) and a
 **Test connection** button; the **model dropdown** is pre-filled with each provider's

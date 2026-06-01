@@ -89,11 +89,14 @@ def test_snapshot_and_find_new_transcript(tmp_path, monkeypatch):
     assert cc.find_new_transcript(cc.snapshot_transcripts()) is None
 
 
-def test_launch_returns_false_off_mac(monkeypatch):
+def test_launch_returns_false_without_tmux_off_mac(monkeypatch):
     from cdm import claude_code as cc
 
     monkeypatch.setattr(cc.platform, "system", lambda: "Linux")
-    assert cc.launch_claude_in_terminal("/tmp", "hello") is False
+    monkeypatch.setattr(cc.shutil, "which", lambda *_a, **_k: None)  # no tmux, no claude
+    assert cc.launch_claude_in_terminal("/tmp", "hello") == (False, None)
+    # An applescript handle is a no-op off macOS.
+    assert cc.send_to_terminal("applescript:/dev/ttys003", "hi there") is False
 
 
 def test_tail_waits_for_complete_line(tmp_path):
@@ -107,3 +110,57 @@ def test_tail_waits_for_complete_line(tmp_path):
         fh.write("\n")
     nt = tail.new_turns()
     assert len(nt) == 1 and nt[0]["text"] == "partial"
+
+
+def test_applescript_send_script_targets_tty_and_escapes():
+    from cdm.claude_code import _applescript_send_script
+
+    script = _applescript_send_script("/dev/ttys003", 'say "hi" now')
+    assert 'tty of t is "/dev/ttys003"' in script
+    # Double quotes in the message are escaped so the AppleScript stays valid.
+    assert '\\"hi\\"' in script
+
+
+def test_send_to_terminal_rejects_empty_inputs():
+    from cdm.claude_code import send_to_terminal
+
+    # No handle / blank text => never shells out, on any platform.
+    assert send_to_terminal("", "hello") is False
+    assert send_to_terminal("tmux:sess", "   ") is False
+    assert send_to_terminal("unknown:thing", "hello") is False  # unknown backend
+
+
+def test_launch_prefers_tmux(monkeypatch):
+    """When tmux exists, it is used on any platform and yields a tmux: handle."""
+    from cdm import claude_code as cc
+
+    monkeypatch.setattr(cc.shutil, "which", lambda c, *_a, **_k: "/usr/bin/" + c)
+    monkeypatch.setattr(cc, "_open_terminal_attached", lambda *_a, **_k: True)
+    calls = []
+
+    class _R:
+        returncode = 0
+        stdout = ""
+
+    monkeypatch.setattr(cc.subprocess, "run", lambda argv, **kw: calls.append(argv) or _R())
+
+    ok, handle = cc.launch_claude_in_terminal("/work", "do the thing", anchor="A", name="proj")
+    assert ok is True and handle.startswith("tmux:")
+    assert calls and calls[0][:3] == ["tmux", "new-session", "-d"]
+
+
+def test_send_to_terminal_tmux_uses_send_keys(monkeypatch):
+    """tmux forwarding sends the collapsed text literally, then a separate Enter."""
+    from cdm import claude_code as cc
+
+    calls = []
+
+    class _R:
+        returncode = 0
+        stdout = ""
+
+    monkeypatch.setattr(cc.subprocess, "run", lambda argv, **kw: calls.append(argv) or _R())
+
+    assert cc.send_to_terminal("tmux:drifter_x", "hello\nworld  again") is True
+    assert calls[0] == ["tmux", "send-keys", "-t", "drifter_x", "-l", "hello world again"]
+    assert calls[1] == ["tmux", "send-keys", "-t", "drifter_x", "Enter"]
