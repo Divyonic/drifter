@@ -29,6 +29,7 @@ __all__ = [
     "snapshot_transcripts",
     "find_new_transcript",
     "launch_claude_in_terminal",
+    "send_to_terminal",
 ]
 
 # Noise we never want to treat as a real user turn (slash-command echoes, the
@@ -211,33 +212,223 @@ def find_new_transcript(before: Set[str], cwd: Optional[str] = None) -> Optional
     return fresh[0][1]
 
 
+# --- launching & forwarding into an interactive `claude` session -------------
+#
+# Drifter can open a `claude` session in a real terminal and then forward messages
+# the user types in the app INTO that session. This is cross-platform via a small
+# backend dispatch keyed by a scheme-prefixed *handle* string:
+#
+#   "tmux:<session>"        -> tmux send-keys (macOS / Linux / WSL / MSYS — preferred)
+#   "applescript:<tty>"     -> Terminal.app via osascript (macOS fallback, no tmux)
+#
+# tmux is preferred everywhere it exists: `send-keys` is robust, needs no
+# Accessibility/Automation permission, and takes text as a literal argv argument
+# (no escaping pitfalls). The reply always flows back into Drifter via the
+# transcript tail regardless of backend.
+
+# Linux terminal emulators and the flag each uses to run a command, tried in order.
+_LINUX_TERMINALS: List[tuple] = [
+    ("x-terminal-emulator", ["-e"]),
+    ("gnome-terminal", ["--"]),
+    ("konsole", ["-e"]),
+    ("xfce4-terminal", ["-x"]),
+    ("tilix", ["-e"]),
+    ("alacritty", ["-e"]),
+    ("kitty", []),
+    ("xterm", ["-e"]),
+]
+
+
+def _have(cmd: str) -> bool:
+    return shutil.which(cmd) is not None
+
+
+def _claude_argv(name: Optional[str], anchor: Optional[str], kickoff: Optional[str]) -> List[str]:
+    """The argv to start an interactive ``claude`` seeded with goal/kickoff."""
+    argv = [shutil.which("claude") or "claude"]
+    if name:
+        argv += ["-n", name]
+    if anchor:
+        argv += ["--append-system-prompt", anchor]
+    if kickoff:
+        argv += [kickoff]
+    return argv
+
+
+def _tmux_session_name(name: Optional[str]) -> str:
+    import re
+    import uuid
+
+    base = re.sub(r"[^A-Za-z0-9_]", "_", (name or "drifter")).strip("_")[:24] or "drifter"
+    return f"drifter_{base}_{uuid.uuid4().hex[:6]}"
+
+
+def _open_terminal_attached(session: str) -> bool:
+    """Best-effort: open a visible terminal attached to the tmux ``session``.
+
+    Forwarding works without this (the user can ``tmux attach`` themselves and
+    Drifter tails the transcript regardless), so failures are non-fatal.
+    """
+    attach = ["tmux", "attach", "-t", session]
+    sysname = platform.system()
+    try:
+        if sysname == "Darwin":
+            cmd = "tmux attach -t " + shlex.quote(session)
+            esc = cmd.replace("\\", "\\\\").replace('"', '\\"')
+            subprocess.run(
+                ["osascript", "-e",
+                 f'tell application "Terminal"\n  activate\n  do script "{esc}"\nend tell'],
+                capture_output=True, timeout=15,
+            )
+            return True
+        if sysname == "Linux":
+            for term, flags in _LINUX_TERMINALS:
+                if _have(term):
+                    try:
+                        subprocess.Popen([term, *flags, *attach])
+                        return True
+                    except Exception:
+                        continue
+            return False
+        if sysname == "Windows":
+            # Prefer Windows Terminal; fall back to a new console window.
+            for prefix in (["wt", "--"], ["cmd", "/c", "start", ""]):
+                if prefix[0] == "wt" and not _have("wt"):
+                    continue
+                try:
+                    subprocess.Popen([*prefix, *attach])
+                    return True
+                except Exception:
+                    continue
+            return False
+    except Exception:
+        return False
+    return False
+
+
+def _launch_tmux(cwd: str, name: Optional[str], anchor: Optional[str],
+                 kickoff: Optional[str]) -> Optional[str]:
+    """Start ``claude`` in a detached tmux session; return its ``tmux:<name>`` handle."""
+    session = _tmux_session_name(name)
+    argv = _claude_argv(name, anchor, kickoff)
+    # tmux runs this via the shell, so quote for the shell and exec into claude.
+    cmd = "cd " + shlex.quote(cwd) + " && exec " + " ".join(shlex.quote(a) for a in argv)
+    try:
+        subprocess.run(
+            ["tmux", "new-session", "-d", "-s", session, cmd],
+            check=True, capture_output=True, timeout=15,
+        )
+    except Exception:
+        return None
+    _open_terminal_attached(session)  # best-effort visibility
+    return f"tmux:{session}"
+
+
+def _launch_applescript(cwd: str, name: Optional[str], anchor: Optional[str],
+                        kickoff: Optional[str]) -> tuple[bool, Optional[str]]:
+    """macOS fallback: open Terminal.app via osascript and capture the tab's tty."""
+    argv = _claude_argv(name, anchor, kickoff)
+    command = "cd " + shlex.quote(cwd) + " && " + " ".join(shlex.quote(a) for a in argv)
+    escaped = command.replace("\\", "\\\\").replace('"', '\\"')
+    script = (
+        'tell application "Terminal"\n'
+        "  activate\n"
+        f'  set _t to do script "{escaped}"\n'
+        "  return tty of _t\n"
+        "end tell"
+    )
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", script], check=True, capture_output=True, timeout=15, text=True
+        )
+        tty = (r.stdout or "").strip()
+        # Launched either way; only a real tty enables forwarding.
+        return (True, f"applescript:{tty}" if tty.startswith("/dev/") else None)
+    except Exception:
+        return (False, None)
+
+
 def launch_claude_in_terminal(
     cwd: str, kickoff: str, anchor: Optional[str] = None, name: Optional[str] = None
-) -> bool:
-    """Open a new Terminal window running an interactive ``claude`` session.
+) -> tuple[bool, Optional[str]]:
+    """Open an interactive ``claude`` session in a terminal, cross-platform.
 
     Seeds it with ``kickoff`` (first prompt), ``anchor`` (appended system prompt) and
-    an optional session ``name``. macOS only (uses Terminal.app via osascript);
-    returns False on other platforms or any failure so the caller can degrade.
+    an optional session ``name``. Prefers tmux on any platform (so messages can be
+    forwarded later via :func:`send_to_terminal`), with a macOS Terminal.app fallback.
+
+    Returns ``(launched, handle)``: ``launched`` is True on success; ``handle`` is a
+    scheme-prefixed string (``"tmux:..."`` / ``"applescript:..."``) the caller passes
+    back to :func:`send_to_terminal`, or None when forwarding isn't available.
     """
-    if platform.system() != "Darwin":
-        return False
-    exe = shutil.which("claude") or "claude"
-    args = [exe]
-    if name:
-        args += ["-n", name]
-    if anchor:
-        args += ["--append-system-prompt", anchor]
-    if kickoff:
-        args += [kickoff]
-    command = "cd " + shlex.quote(cwd) + " && " + " ".join(shlex.quote(a) for a in args)
-    escaped = command.replace("\\", "\\\\").replace('"', '\\"')
-    script = f'tell application "Terminal"\n  activate\n  do script "{escaped}"\nend tell'
+    if _have("tmux"):
+        handle = _launch_tmux(cwd, name, anchor, kickoff)
+        if handle:
+            return (True, handle)
+    if platform.system() == "Darwin":
+        return _launch_applescript(cwd, name, anchor, kickoff)
+    return (False, None)
+
+
+def _send_tmux(session: str, line: str) -> bool:
     try:
-        subprocess.run(["osascript", "-e", script], check=True, capture_output=True, timeout=15)
+        subprocess.run(["tmux", "send-keys", "-t", session, "-l", line],
+                       check=True, capture_output=True, timeout=10)
+        subprocess.run(["tmux", "send-keys", "-t", session, "Enter"],
+                       check=True, capture_output=True, timeout=10)
         return True
     except Exception:
         return False
+
+
+def _applescript_send_script(tty: str, line: str) -> str:
+    """AppleScript that types ``line`` into the Terminal tab on ``tty`` (then submits)."""
+    esc = line.replace("\\", "\\\\").replace('"', '\\"')
+    tty_esc = tty.replace("\\", "\\\\").replace('"', '\\"')
+    return (
+        'tell application "Terminal"\n'
+        "  repeat with w in windows\n"
+        "    repeat with t in tabs of w\n"
+        f'      if tty of t is "{tty_esc}" then\n'
+        f'        do script "{esc}" in t\n'
+        '        return "ok"\n'
+        "      end if\n"
+        "    end repeat\n"
+        "  end repeat\n"
+        "end tell\n"
+        'return "no"'
+    )
+
+
+def _send_applescript(tty: str, line: str) -> bool:
+    if platform.system() != "Darwin" or not tty:
+        return False
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", _applescript_send_script(tty, line)],
+            capture_output=True, timeout=10, text=True,
+        )
+        return r.returncode == 0 and "ok" in (r.stdout or "")
+    except Exception:
+        return False
+
+
+def send_to_terminal(handle: str, text: str) -> bool:
+    """Forward ``text`` as a prompt into the linked ``claude`` session.
+
+    ``handle`` is what :func:`launch_claude_in_terminal` returned. Newlines are
+    collapsed to a single line because a TUI submits on Enter (an embedded newline
+    would send early). Returns True when delivered; the reply tails back into Drifter.
+    """
+    if not handle or not text.strip():
+        return False
+    line = " ".join(text.split())
+    scheme, _, rest = handle.partition(":")
+    if scheme == "tmux":
+        return _send_tmux(rest, line)
+    if scheme == "applescript":
+        return _send_applescript(rest, line)
+    return False
 
 
 class ClaudeCodeTail:
