@@ -142,6 +142,51 @@ class DriftMonitor:
         self.store.add_goal_state(initial_state)
         return session
 
+    def set_goal(
+        self,
+        session_id: str,
+        new_goal: str,
+        constraints: Optional[List[str]] = None,
+    ) -> Session:
+        """Re-anchor a session to a corrected goal (and, optionally, constraints).
+
+        The anchor is normally the immutable north star, but the offline
+        heuristic can mis-anchor on a noisy first turn and Smart mode can detect
+        that the goal legitimately evolved. This updates the stored anchor,
+        invalidates the cached anchor embedding so it is re-embedded, and
+        regenerates the goal state at the current last turn so the reference
+        embedding reflects the new goal immediately.
+
+        Args:
+            session_id: The session to re-anchor.
+            new_goal: The corrected anchor goal (must be non-empty).
+            constraints: If given, replaces the session's constraints.
+
+        Returns:
+            The updated :class:`Session`.
+
+        Raises:
+            ValueError: if the session is unknown or ``new_goal`` is empty.
+        """
+        session = self.store.get_session(session_id)
+        if session is None:
+            raise ValueError(f"Unknown session_id: {session_id!r}")
+        goal = (new_goal or "").strip()
+        if not goal:
+            raise ValueError("new_goal must be a non-empty string")
+
+        session.anchor_goal = goal
+        if constraints is not None:
+            session.constraints = [c.strip() for c in constraints if c and c.strip()]
+        session.updated_at = _now()
+        self.store.update_session(session)
+
+        self._anchor_cache.pop(session_id, None)  # force re-embed of the new anchor
+        messages = self.store.get_messages(session_id)
+        last_turn = messages[-1].turn_id if messages else _INITIAL_SNAPSHOT
+        self._regenerate_goal_state(session, messages, last_turn, session.updated_at)
+        return session
+
     # -- turns ----------------------------------------------------------------
 
     def add_turn(self, session_id: str, role: str, text: str) -> Dict[str, Any]:

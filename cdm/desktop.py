@@ -94,7 +94,7 @@ from cdm.llm import (
     save_key,
 )
 from cdm.monitor import DriftMonitor
-from cdm.transcript import parse_transcript
+from cdm.transcript import parse_transcript, pick_anchor_goal
 from cdm.watcher import is_watcher_running, start_watcher_process, stop_watcher
 
 # --------------------------------------------------------------------------- #
@@ -1702,15 +1702,21 @@ class NewSessionDialog(QDialog):
 
 
 def start_cc_monitoring(monitor: DriftMonitor, cc_path: str) -> Optional[str]:
-    """Create a Drifter session from a Claude Code transcript (anchor = first
-    prompt; ingest the rest). Returns the new session id, or None if empty."""
+    """Create a Drifter session from a Claude Code transcript.
+
+    The anchor is chosen by :func:`pick_anchor_goal` (the first substantive,
+    goal-like user turn) rather than the literal first line, which on Claude Code
+    logs is usually a throwaway command. The full transcript is then ingested so
+    the drift chart reflects the whole conversation. Returns the new session id,
+    or None if empty."""
     turns = cc.parse_transcript_file(cc_path)
     if not turns:
         return None
-    anchor = turns[0]["text"]
-    label = (anchor[:40] + "…") if len(anchor) > 40 else anchor
+    anchor = pick_anchor_goal(turns) or turns[0]["text"]
+    label = anchor.splitlines()[0].strip() if anchor else "session"
+    label = (label[:40] + "…") if len(label) > 40 else label
     session = monitor.start_session(f"Claude Code · {label}", anchor, [])
-    rest = [{"role": t["role"], "text": t["text"]} for t in turns[1:]]
+    rest = [{"role": t["role"], "text": t["text"]} for t in turns]
     if rest:
         monitor.ingest_transcript(session.session_id, rest)
     return session.session_id
@@ -1912,12 +1918,15 @@ class SessionsPage(QWidget):
 
         manage = QHBoxLayout()
         rename_btn = QPushButton("Rename")
+        edit_goal_btn = QPushButton("Edit goal")
         delete_btn = QPushButton("Delete")
         cc_btn = QPushButton("Monitor Claude Code…")
         rename_btn.clicked.connect(self._rename)
+        edit_goal_btn.clicked.connect(self._edit_goal)
         delete_btn.clicked.connect(self._delete)
         cc_btn.clicked.connect(self._monitor_cc)
         manage.addWidget(rename_btn)
+        manage.addWidget(edit_goal_btn)
         manage.addWidget(delete_btn)
         manage.addStretch(1)
         manage.addWidget(cc_btn)
@@ -2012,9 +2021,9 @@ class SessionsPage(QWidget):
         if not turns:
             QMessageBox.warning(self, "Drifter", "No turns could be parsed from that file.")
             return
-        session = self.monitor.start_session("Imported chat", turns[0]["text"], [])
-        if len(turns) > 1:
-            self.monitor.ingest_transcript(session.session_id, turns[1:])
+        anchor = pick_anchor_goal(turns) or turns[0]["text"]
+        session = self.monitor.start_session("Imported chat", anchor, [])
+        self.monitor.ingest_transcript(session.session_id, turns)
         self.shell.open_session(session.session_id)
 
     def _rename(self) -> None:
@@ -2028,6 +2037,23 @@ class SessionsPage(QWidget):
         if ok and name.strip():
             session.project_name = name.strip()
             self.monitor.store.update_session(session)
+            self._populate()
+
+    def _edit_goal(self) -> None:
+        sid = self._selected_id()
+        if not sid:
+            return
+        session = self.monitor.store.get_session(sid)
+        if session is None:
+            return
+        goal, ok = QInputDialog.getMultiLineText(
+            self, "Edit goal",
+            "North-star goal for this session (pin it so drift is measured against "
+            "what you actually want):",
+            session.anchor_goal or "",
+        )
+        if ok and goal.strip():
+            self.monitor.set_goal(sid, goal.strip())
             self._populate()
 
     def _delete(self) -> None:
@@ -2914,6 +2940,17 @@ class MonitorPage(QWidget):
         if self._dead:
             return
         self.smart_verdict = verdict
+        # When the LLM judges the goal to have legitimately evolved, persist the
+        # refined goal as the new anchor — otherwise the coach claims "anchor
+        # updated" while the stored anchor (possibly a mis-picked turn) never moves.
+        if verdict.get("status") == "evolved":
+            new_goal = (verdict.get("core_goal") or "").strip()
+            session = self.monitor.store.get_session(self.session_id)
+            if new_goal and session and new_goal != (session.anchor_goal or "").strip():
+                try:
+                    self.monitor.set_goal(self.session_id, new_goal)
+                except Exception:
+                    pass  # never let a re-anchor failure break the UI
         self._update_smart_ui()
         self._update_coach()
         self._update_subgoals()
